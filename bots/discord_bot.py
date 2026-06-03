@@ -64,25 +64,29 @@ def log(message):
 
 
 def load_env_file(path, required):
-    """Parse un fichier ``KEY=VALUE`` (stdlib) et vérifie les clés requises.
+    """Parse un fichier ``KEY=VALUE`` ou lit les variables d'environnement système.
 
-    Ignore les lignes vides et les commentaires ``#``. Lève ``KeyError`` si une
-    clé requise est absente. Ne logge jamais les valeurs (secrets).
+    Si le fichier existe, il est parsé (lignes vides et commentaires ``#`` ignorés).
+    S'il est absent (Railway, Docker…), on retombe sur ``os.environ``.
+    Lève ``KeyError`` si une clé requise est absente. Ne logge jamais les valeurs.
     """
-    if not path.exists():
-        raise FileNotFoundError(f"Fichier de configuration manquant : {path}")
-
-    values = {}
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, value = line.partition("=")
-        values[key.strip()] = value.strip().strip('"').strip("'")
+    if path.exists():
+        values = {}
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            values[key.strip()] = value.strip().strip('"').strip("'")
+        source = path.name
+    else:
+        values = dict(os.environ)
+        source = "variables d'environnement système"
+        log(f"Fichier {path.name} absent — lecture depuis {source}.")
 
     missing = [key for key in required if not values.get(key)]
     if missing:
-        raise KeyError(f"Clé(s) manquante(s) dans {path.name} : {', '.join(missing)}")
+        raise KeyError(f"Clé(s) manquante(s) dans {source} : {', '.join(missing)}")
     return values
 
 
