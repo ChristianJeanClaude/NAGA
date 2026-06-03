@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Secrets
+.env.discord
+.env.notion
+*.env
+
+# Claude Code — paramètres locaux (permissions, chemins machine)
+.claude/settings.local.json
