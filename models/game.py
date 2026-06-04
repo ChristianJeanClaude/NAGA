@@ -29,6 +29,10 @@ class GameData:
     genres: list[str] = field(default_factory=list)  # e.g. ["Action", "Indie"]
     website: str | None = None
 
+    # --- Steam API (enrichissement) ---
+    screenshots: list[str] = field(default_factory=list)  # URLs CDN (3 max)
+    trailer: str | None = None  # URL webm.max ou mp4.max du 1er film
+
     # --- Scraping (store page) ---
     tags: list[str] = field(default_factory=list)  # top 5 community tags
     review_score: str | None = None  # e.g. "Très positif", "Mixte"
@@ -40,11 +44,16 @@ class GameData:
     owners_estimate: str | None = None  # e.g. "500,000 .. 1,000,000"
     peak_ccu: int | None = None
     avg_playtime_minutes: int | None = None
+    followers: int | None = None
 
     # --- Discord context ---
     scouted_by: str  # Discord username
     scouted_at: str  # ISO 8601 timestamp
     discord_message_url: str
+    attachments: list[str] = field(default_factory=list)  # URLs des pièces jointes
+
+    # --- Computed ---
+    relevance_score: int = 0  # 0-100, voir services.scoring
 
     @staticmethod
     def _parse_steam_date(raw: str | None) -> str | None:
@@ -107,6 +116,10 @@ class GameData:
             if value:
                 props[name] = {"url": value}
 
+        def add_date(name: str, value: str | None) -> None:
+            if value:
+                props[name] = {"date": {"start": value}}
+
         # --- Identifiers ---
         add_title("Game", self.name)
         add_number("Steam App ID", self.app_id)
@@ -117,6 +130,13 @@ class GameData:
         add_text("Developer", self.developer)
         add_multi_select("Genres", self.genres)
         add_url("Website", self.website)
+        # release_date est brut ("21 Sep, 2023") : on le convertit en ISO 8601.
+        add_date("Release Date", self._parse_steam_date(self.release_date))
+
+        # --- Steam API (enrichissement) ---
+        # URLs des captures d'écran, une par ligne dans un champ texte.
+        add_text("Screenshots", "\n".join(self.screenshots))
+        add_url("Trailer", self.trailer)
 
         # --- Scraping (store page) ---
         add_multi_select("Tags", self.tags)
@@ -128,8 +148,16 @@ class GameData:
         # --- SteamSpy ---
         add_text("Owners Estimate", self.owners_estimate)
         add_number("Peak CCU", self.peak_ccu)
+        add_number("Followers", self.followers)
 
         # --- Discord context ---
         add_text("Scouted By", self.scouted_by)
+        add_date("Scouted At", self.scouted_at)
+        # URLs des pièces jointes Discord, une par ligne dans un champ texte.
+        add_text("Attachments", "\n".join(self.attachments))
+
+        # --- Computed ---
+        if self.relevance_score:
+            add_number("Relevance Score", self.relevance_score)
 
         return props

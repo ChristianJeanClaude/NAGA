@@ -13,6 +13,7 @@ tout dans un objet :class:`~models.game.GameData`.
 
 import asyncio
 import re
+from urllib.parse import parse_qs, unquote, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -36,15 +37,20 @@ _AGE_GATE_COOKIES = {
     "lastagecheckage": "1-January-1988",
 }
 
+# ``\d+`` s'arrête au premier caractère non numérique (``/`` ou ``?``), donc
+# le slug, le slash final, les query params et les fragments sont ignorés.
 _APP_ID_RE = re.compile(r"/app/(\d+)")
 
 
 def extract_app_id(url: str) -> int | None:
     """Extrait l'App ID Steam d'une URL de page boutique.
 
-    Gère les formats :
+    Seul l'identifiant numérique est extrait, quel que soit ce qui le suit
+    (slug, slash final, query params ``?l=french``, fragments…). Exemples :
     - ``https://store.steampowered.com/app/1234567/Game_Name/``
     - ``https://store.steampowered.com/app/1234567``
+    - ``https://store.steampowered.com/app/1234567/Game_Name/?l=french``
+    - ``https://store.steampowered.com/app/1234567?curator_clanid=xxx``
 
     Retourne ``None`` si aucun App ID n'est trouvé.
     """
@@ -54,11 +60,27 @@ def extract_app_id(url: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _decode_steam_link(href: str) -> str:
+    """Décode un lien social encapsulé par le redirecteur Steam.
+
+    Steam enveloppe les liens externes des pages boutique dans une URL de
+    redirection ``https://steamcommunity.com/linkfilter/?u=<url_encodée>``.
+    Cette fonction extrait le paramètre ``u`` et le décode pour retrouver
+    l'URL directe (ex. ``https://discord.gg/abc``). Si ``href`` n'est pas un
+    lien ``linkfilter`` (ou est vide), il est retourné tel quel.
+    """
+    if not href or "/linkfilter/" not in href:
+        return href
+    target = parse_qs(urlparse(href).query).get("u")
+    return unquote(target[0]) if target else href
+
+
 async def fetch_game_data(
     app_id: int,
     scouted_by: str,
     scouted_at: str,
     discord_message_url: str,
+    attachments: list[str] | None = None,
 ) -> GameData:
     """Orchestre la récupération des données et retourne un ``GameData`` peuplé.
 
@@ -67,6 +89,9 @@ async def fetch_game_data(
     (jeu introuvable) est propagée ; le scraping et SteamSpy sont en
     « best-effort » : leur échec laisse les champs correspondants vides plutôt
     que de faire échouer tout le scouting.
+
+    ``attachments`` : URLs des pièces jointes du message Discord (images, PDF de
+    pitch deck), conservées telles quelles dans la fiche.
     """
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         api_data = await _fetch_steam_api(app_id, session)
@@ -87,6 +112,7 @@ async def fetch_game_data(
         scouted_by=scouted_by,
         scouted_at=scouted_at,
         discord_message_url=discord_message_url,
+        attachments=attachments or [],
         **api_data,
         **scrape_data,
         **steamspy_data,
@@ -173,7 +199,38 @@ async def _fetch_steam_api(app_id: int, session: aiohttp.ClientSession) -> dict:
         "platforms": platforms,
         "genres": [g["description"] for g in data.get("genres", [])],
         "website": data.get("website"),
+        "screenshots": _extract_screenshots(data),
+        "trailer": _extract_trailer(data),
     }
+
+
+def _extract_screenshots(data: dict) -> list[str]:
+    """Extrait les 3 premières captures d'écran (URLs directes CDN).
+
+    Lit ``data["screenshots"]`` (liste de dicts à champ ``path_full``).
+    Best-effort : si le champ est absent ou une entrée est mal formée, elle est
+    ignorée ; retourne une liste vide en dernier recours.
+    """
+    return [
+        shot["path_full"]
+        for shot in (data.get("screenshots") or [])
+        if isinstance(shot, dict) and shot.get("path_full")
+    ][:3]
+
+
+def _extract_trailer(data: dict) -> str | None:
+    """Retourne l'URL du premier film, en préférant le WebM puis le MP4.
+
+    Lit ``data["movies"]`` et renvoie ``webm.max`` ou, à défaut, ``mp4.max`` du
+    premier film. Retourne ``None`` si aucun film exploitable n'est présent.
+    """
+    movies = data.get("movies") or []
+    if not movies or not isinstance(movies[0], dict):
+        return None
+    first = movies[0]
+    webm = first.get("webm") or {}
+    mp4 = first.get("mp4") or {}
+    return webm.get("max") or mp4.get("max") or None
 
 
 async def _scrape_store_page(app_id: int, session: aiohttp.ClientSession) -> dict:
@@ -226,7 +283,9 @@ async def _scrape_store_page(app_id: int, session: aiohttp.ClientSession) -> dic
     discord_url: str | None = None
     twitter_url: str | None = None
     for anchor in soup.find_all("a", href=True):
-        href = anchor["href"]
+        # Steam encapsule les liens externes dans un redirecteur ; on décode
+        # le paramètre ``u=`` pour stocker l'URL directe.
+        href = _decode_steam_link(anchor["href"])
         if discord_url is None and ("discord.gg" in href or "discord.com" in href):
             discord_url = href
         elif twitter_url is None and ("twitter.com" in href or "x.com" in href):
@@ -260,14 +319,17 @@ async def _fetch_steamspy(app_id: int, session: aiohttp.ClientSession) -> dict:
             "owners_estimate": None,
             "peak_ccu": None,
             "avg_playtime_minutes": None,
+            "followers": None,
         }
 
     owners = data.get("owners") or None
     peak_ccu = data.get("ccu")
     avg_playtime = data.get("average_forever")
+    followers = data.get("followers")
 
     return {
         "owners_estimate": owners,
         "peak_ccu": peak_ccu if isinstance(peak_ccu, int) else None,
         "avg_playtime_minutes": avg_playtime if isinstance(avg_playtime, int) else None,
+        "followers": followers if isinstance(followers, int) else None,
     }

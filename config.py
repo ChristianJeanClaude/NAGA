@@ -31,6 +31,30 @@ except ValueError:
         f"DISCORD_CHANNEL_ID must be a valid integer, got: {_channel_id_raw}"
     )
 
+_scout_log_raw = _require("DISCORD_SCOUT_LOG_CHANNEL_ID")
+try:
+    DISCORD_SCOUT_LOG_CHANNEL_ID = int(_scout_log_raw)
+except ValueError:
+    raise ValueError(
+        f"DISCORD_SCOUT_LOG_CHANNEL_ID must be a valid integer, got: {_scout_log_raw}"
+    )
+
+_suggest_channel_raw = _require("DISCORD_SUGGEST_CHANNEL_ID")
+try:
+    DISCORD_SUGGEST_CHANNEL_ID = int(_suggest_channel_raw)
+except ValueError:
+    raise ValueError(
+        f"DISCORD_SUGGEST_CHANNEL_ID must be a valid integer, got: {_suggest_channel_raw}"
+    )
+
+_cmd_channel_raw = _require("DISCORD_CMD_CHANNEL_ID")
+try:
+    DISCORD_CMD_CHANNEL_ID = int(_cmd_channel_raw)
+except ValueError:
+    raise ValueError(
+        f"DISCORD_CMD_CHANNEL_ID must be a valid integer, got: {_cmd_channel_raw}"
+    )
+
 NOTION_TOKEN: str = _require("NOTION_TOKEN")
 NOTION_DATABASE_ID: str = _require("NOTION_DATABASE_ID")
 STEAM_API_KEY: str = _require("STEAM_API_KEY")

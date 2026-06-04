@@ -52,6 +52,66 @@ async def find_existing_page(app_id: int) -> str | None:
     return url
 
 
+async def get_page_id(app_id: int) -> str | None:
+    """Comme ``find_existing_page`` mais retourne l'ID de page plutôt que l'URL.
+
+    Retourne ``page["id"]`` si une fiche existe pour cet App ID, ``None`` sinon
+    (y compris en cas d'erreur de l'API Notion, journalisée sans planter).
+    """
+    try:
+        response = await client.databases.query(
+            database_id=str(NOTION_DATABASE_ID),
+            filter={"property": "Steam App ID", "number": {"equals": app_id}},
+        )
+    except Exception:
+        logger.error(
+            "Échec de la recherche Notion (page_id) pour app_id=%s",
+            app_id,
+            exc_info=True,
+        )
+        return None
+
+    results = response.get("results", [])
+    if not results:
+        return None
+
+    return results[0].get("id")
+
+
+async def get_all_app_ids() -> set[int]:
+    """Retourne tous les App IDs Steam présents dans la base Notion.
+
+    Sert à exclure les jeux déjà scoutés des suggestions. Pagine sur tous les
+    résultats. Retourne un ensemble vide en cas d'erreur.
+    """
+    app_ids: set[int] = set()
+    try:
+        cursor = None
+        while True:
+            kwargs = {"database_id": str(NOTION_DATABASE_ID), "page_size": 100}
+            if cursor:
+                kwargs["start_cursor"] = cursor
+            response = await client.databases.query(**kwargs)
+
+            for page in response.get("results", []):
+                prop = page.get("properties", {}).get("Steam App ID", {})
+                number = prop.get("number")
+                if number is not None:
+                    app_ids.add(int(number))
+
+            if response.get("has_more"):
+                cursor = response.get("next_cursor")
+            else:
+                break
+    except Exception:
+        logger.error(
+            "Échec de la récupération des App IDs depuis Notion", exc_info=True
+        )
+        return set()
+
+    return app_ids
+
+
 async def create_game_page(game: GameData) -> str:
     """Crée une nouvelle fiche Notion à partir d'un ``GameData``.
 
