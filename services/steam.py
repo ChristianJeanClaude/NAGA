@@ -41,6 +41,9 @@ _AGE_GATE_COOKIES = {
 # le slug, le slash final, les query params et les fragments sont ignorés.
 _APP_ID_RE = re.compile(r"/app/(\d+)")
 
+# "12,345 followers" → capture le nombre (avec séparateurs de milliers).
+_FOLLOWERS_RE = re.compile(r"([\d,]+)\s+followers", re.IGNORECASE)
+
 
 def extract_app_id(url: str) -> int | None:
     """Extrait l'App ID Steam d'une URL de page boutique.
@@ -233,6 +236,46 @@ def _extract_trailer(data: dict) -> str | None:
     return webm.get("max") or mp4.get("max") or None
 
 
+def _extract_follower_count(soup: BeautifulSoup) -> int | None:
+    """Extrait le nombre de followers de la page boutique (best-effort).
+
+    Steam affiche le compteur dans la ``followsection`` sous la forme
+    « 12,345 followers ». Plusieurs sélecteurs sont essayés en cascade, du plus
+    spécifique au plus large :
+
+    1. ``div.followsection span`` ;
+    2. tout ``span``/``div`` dont le texte contient « followers » près d'un
+       nombre (motif ``[\\d,]+ followers``).
+
+    Le nombre est nettoyé (virgules retirées) puis converti en ``int``. Toute
+    erreur — sélecteur absent, texte non conforme — renvoie ``None`` ; la
+    fonction ne lève jamais.
+    """
+    try:
+        candidates = [
+            el.get_text(" ", strip=True)
+            for el in soup.select("div.followsection span")
+        ]
+        candidates.extend(
+            el.get_text(" ", strip=True)
+            for el in soup.find_all(["span", "div"])
+            if "followers" in el.get_text().lower()
+        )
+
+        for text in candidates:
+            match = _FOLLOWERS_RE.search(text)
+            if not match:
+                continue
+            try:
+                return int(match.group(1).replace(",", ""))
+            except ValueError:
+                continue
+    except Exception:
+        # Best-effort : ne jamais faire échouer le scraping pour les followers.
+        return None
+    return None
+
+
 async def _scrape_store_page(app_id: int, session: aiohttp.ClientSession) -> dict:
     """Scrape la page boutique : tags, avis, liens sociaux (best-effort).
 
@@ -293,12 +336,15 @@ async def _scrape_store_page(app_id: int, session: aiohttp.ClientSession) -> dic
         if discord_url and twitter_url:
             break
 
+    follower_count = _extract_follower_count(soup)
+
     return {
         "tags": tags,
         "review_score": review_score,
         "review_count": review_count,
         "discord_url": discord_url,
         "twitter_url": twitter_url,
+        "follower_count": follower_count,
     }
 
 

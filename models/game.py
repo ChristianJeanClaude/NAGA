@@ -39,6 +39,7 @@ class GameData:
     review_count: int | None = None
     discord_url: str | None = None
     twitter_url: str | None = None
+    follower_count: int | None = None  # followers Steam (scrap page boutique)
 
     # --- SteamSpy ---
     owners_estimate: str | None = None  # e.g. "500,000 .. 1,000,000"
@@ -148,7 +149,12 @@ class GameData:
         # --- SteamSpy ---
         add_text("Owners Estimate", self.owners_estimate)
         add_number("Peak CCU", self.peak_ccu)
-        add_number("Followers", self.followers)
+        # Followers : on privilégie le compteur scrapé de la page boutique
+        # (plus à jour), avec repli sur l'estimation SteamSpy si absent.
+        add_number(
+            "Followers",
+            self.follower_count if self.follower_count is not None else self.followers,
+        )
 
         # --- Discord context ---
         add_text("Scouted By", self.scouted_by)
