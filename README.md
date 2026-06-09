@@ -224,50 +224,38 @@ scouted, and posts up to five suggestions in the suggestions channel.
 ## Bot Flow Diagram
 
 ```
-                         ┌─────────────────────────────┐
-                         │   Steam link posted in the   │
-                         │      scouting channel        │
-                         └──────────────┬──────────────┘
-                                        │
-                                        ▼
-                        ┌──────────────────────────────┐
-                        │ on_message: extract App ID    │
-                        │ Already in Notion?            │
-                        └───────┬───────────────┬───────┘
-                          yes   │               │  no
-                                ▼               ▼
-                    ┌────────────────┐   ┌──────────────────┐
-                    │ Post duplicate │   │ Add 5 reactions  │
-                    │ notice; stop   │   │ 👍 👎 🔥 ❤️ ✅     │
-                    └────────────────┘   └────────┬─────────┘
-                                                  │
-                                  ≥ 2 distinct human reactions
-                                                  │
-                                                  ▼
-                              ┌────────────────────────────────┐
-                              │ on_raw_reaction_add             │
-                              │ • dedup (SQLite cache)          │
-                              │ • dedup guard (Notion)          │
-                              └───────────────┬────────────────┘
-                                              │
-                                              ▼
-                    ┌──────────────────────────────────────────────┐
-                    │ fetch_game_data:                              │
-                    │   Steam appdetails + store scrape + SteamSpy  │
-                    │ compute_relevance_score                       │
-                    └───────────────────┬──────────────────────────┘
-                                        │
-                                        ▼
-                          ┌──────────────────────────┐
-                          │ create Notion page        │
-                          │ mark message as processed │
-                          └─────────────┬─────────────┘
-                                        │
-                                        ▼
-                          ┌──────────────────────────┐
-                          │ Post embed to scout-log   │
-                          │ channel (+ Notion button) │
-                          └──────────────────────────┘
+Steam link posted in the scouting channel
+                │
+                ▼
+on_message: extract App ID
+Already in Notion?
+        │               │
+       yes              no
+        │               │
+        ▼               ▼
+Post duplicate      Add 5 reactions
+notice; stop        👍 👎 🔥 ❤️ ✅
+                        │
+                        ▼
+            ≥ 2 distinct human reactions
+                        │
+                        ▼
+            on_raw_reaction_add
+            • dedup (SQLite cache)
+            • dedup guard (Notion)
+                        │
+                        ▼
+            fetch_game_data:
+              Steam appdetails + store scrape + SteamSpy
+            compute_relevance_score
+                        │
+                        ▼
+            create Notion page
+            mark message as processed
+                        │
+                        ▼
+            Post embed to scout-log channel
+            (+ Notion button)
 ```
 
 ## Deployment (Railway)
@@ -284,7 +272,7 @@ The repository includes `railway.toml` and `nixpacks.toml` for deployment on
    check is disabled because the bot does not expose an HTTP port).
 5. The restart policy retries on failure up to five times.
 
-> **Persistence note:** the local SQLite dedup cache lives in `data/`, which is
+> **Persistence note:** the local SQLite dedup cache lives in `db/scouting.db`, which is
 > ephemeral on Railway and resets on each redeploy. Notion-side duplicate
 > detection still prevents duplicate entries; only the local fast-path cache is
 > reset.
