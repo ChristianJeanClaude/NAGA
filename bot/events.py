@@ -1,8 +1,8 @@
 """Logique principale du bot Discord.
 
 Le bot écoute les réactions ajoutées aux messages du canal de scouting. Quand
-un membre réagit à un message contenant un lien Steam, le bot déclenche le
-pipeline de scouting : extraction de l'App ID, agrégation des données
+deux membres réagissent à un message contenant un lien Steam, le bot déclenche
+le pipeline de scouting : extraction de l'App ID, agrégation des données
 (Steam / SteamSpy), puis création d'une fiche dans Notion.
 
 La déduplication repose sur le cache local (``services.cache``) : un même
@@ -112,7 +112,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     1. Ignore si le canal n'est pas DISCORD_CHANNEL_ID.
     2. Ignore les réactions du bot lui-même.
     3. Récupère le message et en extrait l'App ID Steam (ignore si absent).
-    4. Exige qu'au moins 1 utilisateur distinct (hors bots) ait réagi.
+    4. Exige qu'au moins 2 utilisateurs distincts (hors bots) aient réagi.
     5. Ignore si le message a déjà été traité (cache).
     6. Si une fiche Notion existe déjà pour cet App ID, marque comme traité
        et s'arrête (évite les doublons).
@@ -169,13 +169,13 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         # Pas de lien Steam dans ce message : rien à scouter.
         return
 
-    # 4. Seuil : au moins 1 utilisateur distinct (hors bots) doit avoir réagi.
+    # 4. Seuil : au moins 2 utilisateurs distincts (hors bots) doivent avoir réagi.
     unique_user_ids: set[int] = set()
     for reaction in message.reactions:
         async for user in reaction.users():
             if not user.bot:
                 unique_user_ids.add(user.id)
-    if len(unique_user_ids) < 1:
+    if len(unique_user_ids) < 2:
         return
 
     # 5. Déduplication locale : ne pas retraiter le même message.
