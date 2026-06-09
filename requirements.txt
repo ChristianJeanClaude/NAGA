@@ -5,3 +5,4 @@ aiohttp==3.9.5
 beautifulsoup4==4.12.3
 python-dotenv==1.0.1
 asyncpraw==7.8.1
+atproto==0.0.67

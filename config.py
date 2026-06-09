@@ -61,3 +61,8 @@ except ValueError:
 NOTION_TOKEN: str = _require("NOTION_TOKEN")
 NOTION_DATABASE_ID: str = _require("NOTION_DATABASE_ID")
 STEAM_API_KEY: str = _require("STEAM_API_KEY")
+
+# Identifiants Bluesky optionnels : os.environ.get (et non _require) car le
+# scouting Bluesky est facultatif et le bot doit démarrer sans ces variables.
+BLUESKY_HANDLE: str = os.environ.get("BLUESKY_HANDLE", "")
+BLUESKY_PASSWORD: str = os.environ.get("BLUESKY_PASSWORD", "")
