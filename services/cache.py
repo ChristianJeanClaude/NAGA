@@ -13,8 +13,8 @@ from pathlib import Path
 
 import aiosqlite
 
-DB_DIR = Path("data")
-DB_PATH = DB_DIR / "cache.db"
+DB_DIR = Path("db")
+DB_PATH = DB_DIR / "scouting.db"
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS processed_messages (
@@ -23,15 +23,56 @@ CREATE TABLE IF NOT EXISTS processed_messages (
     app_id       INTEGER NOT NULL,
     processed_at TEXT NOT NULL,   -- ISO 8601 timestamp
     PRIMARY KEY (message_id, channel_id)
-)
+);
+
+CREATE TABLE IF NOT EXISTS snapshots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform    TEXT    NOT NULL,
+    account_id  TEXT    NOT NULL,
+    username    TEXT    NOT NULL,
+    followers   INTEGER,
+    extra_json  TEXT,
+    checked_at  TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_snapshots_account
+    ON snapshots (platform, account_id);
+CREATE INDEX IF NOT EXISTS idx_snapshots_time
+    ON snapshots (checked_at);
+
+CREATE TABLE IF NOT EXISTS posts_seen (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    platform    TEXT    NOT NULL,
+    post_id     TEXT    NOT NULL,
+    author_id   TEXT,
+    seen_at     TEXT    NOT NULL,
+    UNIQUE (platform, post_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_posts_seen_platform
+    ON posts_seen (platform, seen_at);
+
+CREATE TABLE IF NOT EXISTS tracking_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_at      TEXT    NOT NULL,
+    platform    TEXT    NOT NULL,
+    account_id  TEXT    NOT NULL,
+    status      TEXT    NOT NULL,
+    followers   INTEGER,
+    delta       INTEGER,
+    notes       TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracking_log_run
+    ON tracking_log (run_at);
 """
 
 
 async def init_db() -> None:
-    """Crée le dossier ``data/`` et la table si nécessaire."""
+    """Crée le dossier ``db/`` et les tables/index si nécessaire."""
     DB_DIR.mkdir(parents=True, exist_ok=True)
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(_CREATE_TABLE)
+        await db.executescript(_CREATE_TABLE)
         await db.commit()
 
 

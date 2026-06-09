@@ -7,10 +7,13 @@ que de planter plus tard avec une erreur obscure.
 """
 
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+DB_PATH = Path("db/scouting.db")
 
 
 def _require(name: str) -> str:
