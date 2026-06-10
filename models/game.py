@@ -53,6 +53,11 @@ class GameData:
     discord_message_url: str
     attachments: list[str] = field(default_factory=list)  # URLs des pièces jointes
 
+    # --- Momentum ---
+    momentum_score: int | None = None
+    momentum_post: str | None = None   # URL du post viral
+    momentum_stat: str | None = None   # Ex: "+45% followers cette semaine"
+
     # --- Computed ---
     relevance_score: int = 0  # 0-100, voir services.scoring
 
@@ -161,6 +166,11 @@ class GameData:
         add_date("Scouted At", self.scouted_at)
         # URLs des pièces jointes Discord, une par ligne dans un champ texte.
         add_text("Attachments", "\n".join(self.attachments))
+
+        # --- Momentum ---
+        add_number("Momentum Score", self.momentum_score)
+        add_url("Momentum Post", self.momentum_post)
+        add_text("Momentum Stat", self.momentum_stat)
 
         # --- Computed ---
         if self.relevance_score:
