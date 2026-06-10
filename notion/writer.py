@@ -2,7 +2,6 @@
 
 import logging
 import os
-from datetime import datetime
 
 from notion_client import AsyncClient
 
@@ -18,11 +17,8 @@ class NotionWriter:
         await writer.update_game(
             page_id="...",
             momentum_score=45,
-            momentum_label="Rising",
             stat_cle="+45% followers",
-            type_stat="Steam",
             lien_post="https://...",
-            dernier_check=datetime.now(),
         )
     """
 
@@ -34,11 +30,8 @@ class NotionWriter:
         self,
         page_id: str,
         momentum_score: int,
-        momentum_label: str,        # "Hot" | "Rising" | "Stable" | "Flat"
         stat_cle: str,              # Ex: "+45% followers (1,000 → 1,450)"
-        type_stat: str,             # Ex: "Steam" | "Twitter" | "Steam + Twitter"
         lien_post: str,             # URL du post ou de la page Steam
-        dernier_check: datetime,    # UTC
     ) -> bool:
         """
         Met à jour les champs de tracking d'une fiche Notion.
