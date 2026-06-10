@@ -5,6 +5,9 @@ import re
 from dataclasses import dataclass, field
 
 import atproto
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Hashtags scrutés par défaut
 DEFAULT_HASHTAGS = [
