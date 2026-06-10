@@ -15,14 +15,14 @@ from services.retry import with_retry
 logger = logging.getLogger(__name__)
 
 # Seules ces propriétés sont (ré)écrites par l'enrichissement.
-ENRICH_KEYS = {"Screenshots", "Trailer", "Followers", "Release Date"}
+ENRICH_KEYS = {"Trailer", "Followers", "Release Date"}
 
 
 async def enrich_game_page(page_id: str, game: GameData) -> None:
     """Met à jour une fiche Notion avec les données d'enrichissement.
 
-    Pousse uniquement ``Screenshots``, ``Trailer``, ``Followers`` et
-    ``Release Date`` (les champs absents sont naturellement omis par
+    Pousse uniquement ``Trailer``, ``Followers`` et ``Release Date`` (les
+    champs absents sont naturellement omis par
     ``to_notion_properties``). N'a aucun effet si aucune de ces propriétés
     n'est disponible. Les erreurs de l'API Notion sont journalisées sans être
     propagées : l'enrichissement ne doit jamais faire échouer le scouting.

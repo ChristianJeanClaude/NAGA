@@ -30,7 +30,6 @@ class GameData:
     website: str | None = None
 
     # --- Steam API (enrichissement) ---
-    screenshots: list[str] = field(default_factory=list)  # URLs CDN (3 max)
     trailer: str | None = None  # URL webm.max ou mp4.max du 1er film
 
     # --- Scraping (store page) ---
@@ -139,8 +138,6 @@ class GameData:
         add_date("Release Date", self._parse_steam_date(self.release_date))
 
         # --- Steam API (enrichissement) ---
-        # URLs des captures d'écran, une par ligne dans un champ texte.
-        add_text("Screenshots", "\n".join(self.screenshots))
         add_url("Trailer", self.trailer)
 
         # --- Scraping (store page) ---

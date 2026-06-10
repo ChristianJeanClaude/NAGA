@@ -4,7 +4,6 @@ import pytest
 
 from services.steam import (
     _decode_steam_link,
-    _extract_screenshots,
     _extract_trailer,
     extract_app_id,
 )
@@ -71,35 +70,6 @@ def test_extract_app_id_invalid(url):
 )
 def test_decode_steam_link(href, expected):
     assert _decode_steam_link(href) == expected
-
-
-def test_extract_screenshots_takes_first_three():
-    data = {
-        "screenshots": [
-            {"id": i, "path_full": f"https://cdn/ss_{i}.jpg"} for i in range(5)
-        ]
-    }
-    assert _extract_screenshots(data) == [
-        "https://cdn/ss_0.jpg",
-        "https://cdn/ss_1.jpg",
-        "https://cdn/ss_2.jpg",
-    ]
-
-
-def test_extract_screenshots_skips_malformed_and_missing():
-    data = {
-        "screenshots": [
-            {"path_full": "https://cdn/ok.jpg"},
-            {"id": 1},  # pas de path_full
-            "not a dict",
-            {"path_full": ""},  # vide
-        ]
-    }
-    assert _extract_screenshots(data) == ["https://cdn/ok.jpg"]
-
-
-def test_extract_screenshots_absent():
-    assert _extract_screenshots({}) == []
 
 
 def test_extract_trailer_prefers_webm():

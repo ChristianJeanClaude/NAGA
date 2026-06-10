@@ -23,7 +23,6 @@ EXCLUDED = {
     "Scouted By",
     "Scouted At",
     "Status",
-    "Screenshots",
     "Trailer",
     "Followers",
     "Release Date",

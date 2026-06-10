@@ -60,19 +60,6 @@ def test_to_notion_scouted_at_empty_omitted():
     assert "Scouted At" not in game.to_notion_properties()
 
 
-def test_to_notion_screenshots_joined_by_newlines():
-    game = _make_game(screenshots=["https://cdn/a.jpg", "https://cdn/b.jpg"])
-    content = game.to_notion_properties()["Screenshots"]["rich_text"][0]["text"][
-        "content"
-    ]
-    assert content == "https://cdn/a.jpg\nhttps://cdn/b.jpg"
-
-
-def test_to_notion_screenshots_empty_omitted():
-    game = _make_game(screenshots=[])
-    assert "Screenshots" not in game.to_notion_properties()
-
-
 def test_to_notion_trailer_url():
     game = _make_game(trailer="https://cdn/movie.webm")
     assert game.to_notion_properties()["Trailer"] == {"url": "https://cdn/movie.webm"}

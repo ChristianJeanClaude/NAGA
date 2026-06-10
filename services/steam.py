@@ -197,23 +197,8 @@ async def _fetch_steam_api(app_id: int, session: aiohttp.ClientSession) -> dict:
         "platforms": platforms,
         "genres": [g["description"] for g in data.get("genres", [])],
         "website": data.get("website"),
-        "screenshots": _extract_screenshots(data),
         "trailer": _extract_trailer(data),
     }
-
-
-def _extract_screenshots(data: dict) -> list[str]:
-    """Extrait les 3 premières captures d'écran (URLs directes CDN).
-
-    Lit ``data["screenshots"]`` (liste de dicts à champ ``path_full``).
-    Best-effort : si le champ est absent ou une entrée est mal formée, elle est
-    ignorée ; retourne une liste vide en dernier recours.
-    """
-    return [
-        shot["path_full"]
-        for shot in (data.get("screenshots") or [])
-        if isinstance(shot, dict) and shot.get("path_full")
-    ][:3]
 
 
 def _extract_trailer(data: dict) -> str | None:
