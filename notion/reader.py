@@ -5,7 +5,10 @@ import os
 import re
 from dataclasses import dataclass
 
+from dotenv import load_dotenv
 from notion_client import AsyncClient
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 

@@ -3,7 +3,10 @@
 import logging
 import os
 
+from dotenv import load_dotenv
 from notion_client import AsyncClient
+
+load_dotenv()
 
 logger = logging.getLogger(__name__)
 
