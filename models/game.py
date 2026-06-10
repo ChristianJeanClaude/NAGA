@@ -51,7 +51,6 @@ class GameData:
     scouted_by: str  # Discord username
     scouted_at: str  # ISO 8601 timestamp
     discord_message_url: str
-    attachments: list[str] = field(default_factory=list)  # URLs des pièces jointes
 
     # --- Momentum ---
     momentum_score: int | None = None
@@ -164,8 +163,6 @@ class GameData:
         # --- Discord context ---
         add_text("Scouted By", self.scouted_by)
         add_date("Scouted At", self.scouted_at)
-        # URLs des pièces jointes Discord, une par ligne dans un champ texte.
-        add_text("Attachments", "\n".join(self.attachments))
 
         # --- Momentum ---
         add_number("Momentum Score", self.momentum_score)

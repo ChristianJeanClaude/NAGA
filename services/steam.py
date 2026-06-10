@@ -83,7 +83,6 @@ async def fetch_game_data(
     scouted_by: str,
     scouted_at: str,
     discord_message_url: str,
-    attachments: list[str] | None = None,
 ) -> GameData:
     """Orchestre la récupération des données et retourne un ``GameData`` peuplé.
 
@@ -92,9 +91,6 @@ async def fetch_game_data(
     (jeu introuvable) est propagée ; le scraping et SteamSpy sont en
     « best-effort » : leur échec laisse les champs correspondants vides plutôt
     que de faire échouer tout le scouting.
-
-    ``attachments`` : URLs des pièces jointes du message Discord (images, PDF de
-    pitch deck), conservées telles quelles dans la fiche.
     """
     async with aiohttp.ClientSession(headers=HEADERS) as session:
         api_data = await _fetch_steam_api(app_id, session)
@@ -115,7 +111,6 @@ async def fetch_game_data(
         scouted_by=scouted_by,
         scouted_at=scouted_at,
         discord_message_url=discord_message_url,
-        attachments=attachments or [],
         **api_data,
         **scrape_data,
         **steamspy_data,

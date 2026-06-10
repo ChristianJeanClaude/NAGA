@@ -197,8 +197,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     scouted_by = message.author.display_name
     scouted_at = datetime.now(timezone.utc).isoformat()
     discord_message_url = message.jump_url
-    # URLs des pièces jointes du message (images, PDF de pitch deck).
-    attachments = [attachment.url for attachment in message.attachments]
 
     try:
         game = await fetch_game_data(
@@ -206,7 +204,6 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             scouted_by=scouted_by,
             scouted_at=scouted_at,
             discord_message_url=discord_message_url,
-            attachments=attachments,
         )
         game.relevance_score = compute_relevance_score(game)
         notion_url = await create_game_page(game)

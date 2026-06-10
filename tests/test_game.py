@@ -60,20 +60,6 @@ def test_to_notion_scouted_at_empty_omitted():
     assert "Scouted At" not in game.to_notion_properties()
 
 
-def test_to_notion_attachments_joined_by_newlines():
-    game = _make_game(
-        attachments=["https://cdn.example/a.png", "https://cdn.example/deck.pdf"]
-    )
-    props = game.to_notion_properties()
-    content = props["Attachments"]["rich_text"][0]["text"]["content"]
-    assert content == "https://cdn.example/a.png\nhttps://cdn.example/deck.pdf"
-
-
-def test_to_notion_attachments_empty_omitted():
-    game = _make_game(attachments=[])
-    assert "Attachments" not in game.to_notion_properties()
-
-
 def test_to_notion_screenshots_joined_by_newlines():
     game = _make_game(screenshots=["https://cdn/a.jpg", "https://cdn/b.jpg"])
     content = game.to_notion_properties()["Screenshots"]["rich_text"][0]["text"][
