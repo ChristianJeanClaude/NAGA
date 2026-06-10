@@ -20,10 +20,6 @@ from notion.reader import NotionReader, TrackedGame
 from notion.writer import NotionWriter
 from services.cache import init_db
 
-# Pas de SteamClient dédié : on réutilise directement le scraping de la page
-# boutique (``follower_count``) déjà implémenté dans services.steam.
-from services.steam import HEADERS, _scrape_store_page
-
 # Import paresseux : le poster Discord n'est pas encore implémenté. On le rend
 # optionnel pour que le job tourne sans lui (alertes simplement journalisées).
 try:
@@ -94,9 +90,11 @@ class TrackingJob:
             return
 
         followers = await self._get_steam_followers(game.steam_app_id)
-        if followers is None:
+        # 0 = SteamSpy indisponible ou jeu sans followers : on n'enregistre pas
+        # de snapshot pour ne pas polluer le baseline (qui est le plus ancien).
+        if followers <= 0:
             logger.warning(
-                "Followers Steam indisponibles pour '%s' (app_id=%s)",
+                "Followers Steam indisponibles pour '%s' (app_id=%s) — snapshot ignoré",
                 game.name,
                 game.steam_app_id,
             )
@@ -149,22 +147,31 @@ class TrackingJob:
 
         await self._send_alert(game, momentum_score, label, stat_cle)
 
-    async def _get_steam_followers(self, app_id: int) -> int | None:
-        """Relève le nombre de followers Steam via le scraping de la page boutique.
-
-        Retourne ``None`` si le scraping échoue ou si le compteur est absent.
+    async def _get_steam_followers(self, app_id: int) -> int:
         """
+        Retourne le nombre de followers via SteamSpy API.
+        GET https://steamspy.com/api.php?request=appdetails&appid={app_id}
+
+        Retourne data.get("followers") or data.get("ccu") or 0
+        Uses aiohttp, same pattern as services/steam.py _fetch_steamspy.
+        Never raises — returns 0 on any error.
+        """
+        url = "https://steamspy.com/api.php"
+        params = {"request": "appdetails", "appid": app_id}
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        }
         try:
-            async with aiohttp.ClientSession(headers=HEADERS) as session:
-                data = await _scrape_store_page(app_id, session)
-        except Exception:
-            logger.error(
-                "Échec du scraping des followers Steam (app_id=%s)",
-                app_id,
-                exc_info=True,
-            )
-            return None
-        return data.get("follower_count")
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(
+                    url, params=params, timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    resp.raise_for_status()
+                    data = await resp.json(content_type=None)
+                    return data.get("followers") or data.get("ccu") or 0
+        except Exception as exc:
+            logger.warning(f"SteamSpy indisponible pour app_id={app_id}: {exc}")
+            return 0
 
     async def _save_snapshot(
         self, game: TrackedGame, followers: int, now: datetime
