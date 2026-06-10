@@ -369,7 +369,11 @@ async def suggest(ctx):
 
         async with aiohttp.ClientSession(headers=HEADERS) as session:
             suggestions = await search_steam_suggestions(
-                profile["genres"], profile["tags"], known_ids, session
+                profile["genres"],
+                profile["tags"],
+                known_ids,
+                session,
+                hashtags=profile.get("hashtags", []),
             )
 
         if not suggestions:
@@ -379,7 +383,8 @@ async def suggest(ctx):
         await suggest_channel.send(
             f"🎮 **{len(suggestions)} suggestions basées sur le profil NAGA**\n"
             f"Genres : {', '.join(profile['genres'][:3]) or 'N/A'}\n"
-            f"Tags : {', '.join(profile['tags'][:5]) or 'N/A'}"
+            f"Tags : {', '.join(profile['tags'][:3]) or 'N/A'}\n"
+            f"Hashtags du jour : {', '.join(profile.get('hashtags', [])[:3]) or 'N/A'}"
         )
 
         for game in suggestions:

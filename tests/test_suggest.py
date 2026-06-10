@@ -4,7 +4,11 @@ Les appels HTTP sont simulés par une fausse session ``aiohttp`` : aucun appel
 réseau réel n'est effectué.
 """
 
-from services.suggest import get_steamspy_tag_ids
+from services.suggest import (
+    PRIORITY_HASHTAGS,
+    get_steamspy_tag_ids,
+    get_todays_hashtags,
+)
 
 
 class _FakeResponse:
@@ -66,3 +70,18 @@ async def test_get_steamspy_tag_ids_skips_malformed_entries():
 async def test_get_steamspy_tag_ids_non_dict_payload_returns_empty():
     session = _FakeSession(["unexpected", "list"])
     assert await get_steamspy_tag_ids(session) == {}
+
+
+def test_get_todays_hashtags_always_includes_priority():
+    result = get_todays_hashtags()
+    for tag in PRIORITY_HASHTAGS:
+        assert tag in result
+
+
+def test_get_todays_hashtags_max_10():
+    assert len(get_todays_hashtags()) <= 10
+
+
+def test_get_todays_hashtags_no_duplicates():
+    result = get_todays_hashtags()
+    assert len(result) == len(set(result))

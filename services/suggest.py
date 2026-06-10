@@ -13,6 +13,7 @@ import logging
 import random
 import re
 from collections import Counter
+from datetime import datetime
 
 import aiohttp
 
@@ -23,6 +24,75 @@ logger = logging.getLogger(__name__)
 _SEARCH_URL = "https://store.steampowered.com/search/results/"
 # Les items de recherche exposent l'App ID dans l'URL du logo (.../apps/<id>/...).
 _LOGO_APPID_RE = re.compile(r"/apps/(\d+)/")
+
+# Hashtags hebdomadaires (rythmés par jour)
+WEEKLY_HASHTAGS = [
+    "ScreenshotSaturday",
+    "ScreenshotSunday",
+    "WishlistWednesday",
+    "WIPWednesday",
+    "FeedbackFriday",
+    "IndieDevHour",
+    "TurnBasedThursday",
+    "MarketingMonday",
+    "PitchYaGame",
+]
+
+# Hashtags permanents (volume élevé)
+PERMANENT_HASHTAGS = [
+    "indiedev", "gamedev", "indiegame", "indiegames", "indiegamedev",
+    "madewithunity", "unity3D", "gamemaker", "unrealengine", "godotengine",
+    "madewithgodot", "UE5", "pixelart", "lowpoly", "devlog",
+    "soloindiedev", "buildinpublic",
+]
+
+# Hashtags prioritaires pour le scouting (signaux forts)
+PRIORITY_HASHTAGS = [
+    "PitchYaGame",
+    "WishlistWednesday",
+    "ScreenshotSaturday",
+    "devlog",
+    "buildinpublic",
+]
+
+# Hashtags spécifiques au jour de la semaine (weekday() : lundi=0 … dimanche=6).
+_HASHTAGS_BY_WEEKDAY = {
+    0: ["MarketingMonday"],
+    2: ["WishlistWednesday", "WIPWednesday", "IndieDevHour"],
+    3: ["TurnBasedThursday"],
+    4: ["FeedbackFriday"],
+    5: ["ScreenshotSaturday"],
+    6: ["ScreenshotSunday"],
+}
+
+
+def get_todays_hashtags() -> list[str]:
+    """Retourne les hashtags les plus pertinents pour aujourd'hui.
+
+    Combine les hashtags du jour (selon le jour de la semaine), les hashtags
+    prioritaires et les premiers hashtags permanents.
+
+    Monday    → MarketingMonday
+    Wednesday → WishlistWednesday, WIPWednesday, IndieDevHour
+    Thursday  → TurnBasedThursday
+    Friday    → FeedbackFriday
+    Saturday  → ScreenshotSaturday
+    Sunday    → ScreenshotSunday
+
+    Les ``PRIORITY_HASHTAGS`` sont toujours inclus (en tête, pour garantir leur
+    présence sous le plafond), suivis des hashtags du jour puis des 5 premiers
+    ``PERMANENT_HASHTAGS``. Résultat dédupliqué, limité à 10 hashtags.
+    """
+    day_specific = _HASHTAGS_BY_WEEKDAY.get(datetime.now().weekday(), [])
+
+    # Priorité d'abord : garantit que les hashtags forts survivent au plafond.
+    ordered = [*PRIORITY_HASHTAGS, *day_specific, *PERMANENT_HASHTAGS[:5]]
+
+    deduped: list[str] = []
+    for tag in ordered:
+        if tag not in deduped:
+            deduped.append(tag)
+    return deduped[:10]
 
 
 async def get_steamspy_tag_ids(session: aiohttp.ClientSession) -> dict[str, int]:
@@ -68,7 +138,8 @@ async def get_naga_profile(notion_client, database_id: str) -> dict:
 
     Compte la fréquence des valeurs multi-select « Genres » et « Tags » sur
     l'ensemble des fiches (pagination incluse). Retourne
-    ``{"genres": [...], "tags": [...]}`` (listes vides en cas d'erreur).
+    ``{"genres": [...], "tags": [...], "hashtags": [...]}`` (genres/tags vides
+    en cas d'erreur ; les hashtags du jour sont toujours fournis).
     """
     genre_counter: Counter = Counter()
     tag_counter: Counter = Counter()
@@ -97,11 +168,12 @@ async def get_naga_profile(notion_client, database_id: str) -> dict:
                 break
     except Exception:
         logger.error("Échec de la lecture du profil NAGA depuis Notion", exc_info=True)
-        return {"genres": [], "tags": []}
+        return {"genres": [], "tags": [], "hashtags": get_todays_hashtags()}
 
     return {
         "genres": [name for name, _ in genre_counter.most_common(5)],
         "tags": [name for name, _ in tag_counter.most_common(5)],
+        "hashtags": get_todays_hashtags(),
     }
 
 
@@ -138,6 +210,7 @@ async def search_steam_suggestions(
     known_app_ids: set[int],
     session: aiohttp.ClientSession,
     max_results: int = 5,
+    hashtags: list[str] | None = None,
 ) -> list[dict]:
     """Cherche des jeux indés à venir correspondant au profil NAGA.
 
@@ -146,6 +219,11 @@ async def search_steam_suggestions(
     l'App ID, saute ceux déjà connus, puis récupère les infos de base via
     appdetails. Limité à ``max_results``. Retourne une liste vide sur n'importe
     quelle erreur — ne lève jamais.
+
+    ``hashtags`` : Steam ne supporte pas la recherche par hashtag nativement.
+    En « best-effort », les 3 premiers hashtags sont traités comme des noms de
+    tags : s'ils correspondent à un tag SteamSpy, leur ID est ajouté à la liste
+    de tags (toujours plafonnée à 5 au total). Sinon, ils sont ignorés.
     """
     # Résout les noms de tags/genres du profil en IDs Steam via SteamSpy.
     tag_id_map = await get_steamspy_tag_ids(session)
@@ -156,6 +234,15 @@ async def search_steam_suggestions(
         if tag_id is not None and tag_id not in seen_ids:
             seen_ids.add(tag_id)
             tag_ids.append(tag_id)
+
+    # Hashtags du jour en complément : on tente de résoudre les 3 premiers en
+    # IDs de tags SteamSpy (best-effort), sans dépasser le plafond de 5.
+    for name in (hashtags or [])[:3]:
+        tag_id = tag_id_map.get(name)
+        if tag_id is not None and tag_id not in seen_ids:
+            seen_ids.add(tag_id)
+            tag_ids.append(tag_id)
+
     tag_ids = tag_ids[:5]
 
     base_params = {
