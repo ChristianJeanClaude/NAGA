@@ -87,7 +87,7 @@ async def on_message(message: discord.Message) -> None:
         return
 
     # Only add reactions if game is not already scouted
-    for emoji in ["👍", "👎", "🔥", "❤️", "✅"]:
+    for emoji in ["👍", "👎", "🔥", "❤️"]:
         await message.add_reaction(emoji)
 
 
@@ -418,7 +418,7 @@ async def suggest(ctx):
                 )
             )
             suggestion_msg = await suggest_channel.send(embed=embed, view=view)
-            for emoji in ["👍", "👎", "🔥", "❤️", "✅"]:
+            for emoji in ["👍", "👎", "🔥", "❤️"]:
                 await suggestion_msg.add_reaction(emoji)
 
         # Pas de confirmation redondante si on est déjà dans le bon salon.

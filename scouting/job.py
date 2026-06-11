@@ -90,14 +90,18 @@ class ScoutingJob:
         # 6. Plancher de score + top N.
         fresh = [c for c in fresh if c["score"] >= SCORE_FLOOR]
         fresh.sort(key=lambda c: c["score"], reverse=True)
-        top = fresh[:TOP_N]
+        top_candidates = fresh[:TOP_N]
 
-        # 7. Publication Discord.
-        if top:
-            await self.discord.post_scouting_digest(top)
+        # 7. Aucun candidat quali : digest vide, on ne poste rien.
+        if len(top_candidates) == 0:
+            logger.info("Aucun candidat quali ce run — digest vide")
+            return
 
-        # 8. Marquage comme vus.
-        for candidate in top:
+        # 8. Publication Discord (uniquement s'il y a des candidats).
+        await self.discord.post_scouting_digest(top_candidates)
+
+        # 9. Marquage comme vus.
+        for candidate in top_candidates:
             await self._mark_seen(
                 candidate["source"],
                 candidate["post_id"],
@@ -108,7 +112,7 @@ class ScoutingJob:
         logger.info(
             "ScoutingJob : %d candidat(s) collecté(s), %d retenu(s)",
             len(candidates),
-            len(top),
+            len(top_candidates),
         )
 
     async def _collect_steam_candidates(

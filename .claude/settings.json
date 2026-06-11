@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "powershell -Command \"[System.Media.SystemSounds]::Beep.Play(); Start-Sleep -Seconds 1\""
+          }
+        ]
+      }
+    ]
+  }
+}
