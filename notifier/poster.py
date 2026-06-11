@@ -1,99 +1,89 @@
 """Publication des résultats de scouting/tracking dans Discord.
 
-Poste un digest des candidats détectés par le ScoutingJob via un webhook
-Discord (``DISCORD_SCOUT_WEBHOOK``). À défaut de webhook configuré, les
-candidats sont simplement journalisés (repli best-effort). Aucune méthode ne
-propage d'exception : un échec de notification ne doit jamais faire échouer le
-job appelant.
+Poste un digest des candidats détectés par le ScoutingJob directement via le
+canal du bot Discord (``DISCORD_CHANNEL_ID``), en réutilisant l'instance ``bot``
+de ``bot.events``. Aucune méthode ne propage d'exception : un échec de
+notification ne doit jamais faire échouer le job appelant.
 """
 
 import logging
 import os
 
-import aiohttp
-import discord as discord_lib
+import discord
+
+from bot.events import bot
 
 logger = logging.getLogger(__name__)
 
 
 class DiscordPoster:
     def __init__(self):
-        self._webhook_url = os.environ.get("DISCORD_SCOUT_WEBHOOK", "")
+        self._channel_id = int(os.environ.get("DISCORD_CHANNEL_ID", "0"))
 
     async def post_scouting_digest(
         self,
         candidates: list[dict],
         channel_id: int | None = None,
     ) -> None:
-        """
-        Poste les candidats dans Discord via webhook ou channel.
-
-        Pour chaque candidat, crée un embed avec :
-        - title = name
-        - url = steam_url
-        - description = description[:200]
-        - fields: Score, Source, Genres, Release Date
-        - color = 0x5865F2
-        - footer = "NAGA Scout Bot • Auto-scouting 🤖"
-
-        Utilise DISCORD_SCOUT_WEBHOOK si disponible,
-        sinon log les candidats (best-effort fallback).
-        Never raises.
-        """
-        if not candidates:
-            return
-
-        # Repli : pas de webhook configuré → on journalise seulement.
-        if not self._webhook_url:
-            for candidate in candidates:
-                logger.info(
-                    "[scouting] %s (score %s, source %s) — %s",
-                    candidate.get("name"),
-                    candidate.get("score"),
-                    candidate.get("source"),
-                    candidate.get("url"),
-                )
-            return
-
         try:
-            async with aiohttp.ClientSession() as session:
-                webhook = discord_lib.Webhook.from_url(
-                    self._webhook_url, session=session
-                )
-                for candidate in candidates:
-                    await webhook.send(embed=self._build_embed(candidate))
-        except Exception:
-            logger.error(
-                "Échec de la publication du digest de scouting", exc_info=True
-            )
+            target_id = channel_id or self._channel_id
+            channel = bot.get_channel(target_id)
+            if channel is None:
+                logger.warning(f"Channel {target_id} introuvable")
+                return
 
-    @staticmethod
-    def _build_embed(candidate: dict) -> "discord_lib.Embed":
-        """Construit l'embed Discord pour un candidat."""
-        url = candidate.get("url") or None
-        embed = discord_lib.Embed(
-            title=candidate.get("name", "") or "Sans titre",
-            url=url,
-            description=(candidate.get("description", "") or "")[:200],
-            color=0x5865F2,
-        )
-        embed.add_field(
-            name="Score", value=str(candidate.get("score", "?")), inline=True
-        )
-        embed.add_field(
-            name="Source", value=candidate.get("source", "?"), inline=True
-        )
-        genres = candidate.get("genres") or []
-        embed.add_field(
-            name="Genres", value=", ".join(genres) or "N/A", inline=True
-        )
-        embed.add_field(
-            name="Release Date",
-            value=candidate.get("release_date") or "N/A",
-            inline=True,
-        )
-        embed.set_footer(text="NAGA Scout Bot • Auto-scouting 🤖")
-        return embed
+            for candidate in candidates:
+                embed = discord.Embed(
+                    title=candidate.get("name", "Jeu inconnu"),
+                    url=candidate.get("url", ""),
+                    description=candidate.get("description", "")[:200],
+                    color=0x5865F2,
+                )
+                embed.add_field(
+                    name="Score",
+                    value=str(candidate.get("score", 0)),
+                    inline=True,
+                )
+                embed.add_field(
+                    name="Source",
+                    value=candidate.get("source", "N/A"),
+                    inline=True,
+                )
+                embed.add_field(
+                    name="Genres",
+                    value=", ".join(candidate.get("genres", [])) or "N/A",
+                    inline=True,
+                )
+                embed.add_field(
+                    name="Release Date",
+                    value=candidate.get("release_date", "N/A"),
+                    inline=True,
+                )
+                embed.set_footer(text="NAGA Scout Bot • Auto-scouting 🤖")
+
+                if candidate.get("url"):
+                    thumbnail = (
+                        "https://cdn.akamai.steamstatic.com/steam/apps/"
+                        f"{candidate.get('app_id', 0)}/header.jpg"
+                    )
+                    embed.set_thumbnail(url=thumbnail)
+
+                view = discord.ui.View()
+                if candidate.get("url"):
+                    view.add_item(
+                        discord.ui.Button(
+                            label="Voir sur Steam",
+                            url=candidate["url"],
+                            style=discord.ButtonStyle.link,
+                        )
+                    )
+
+                msg = await channel.send(embed=embed, view=view)
+                for emoji in ["👍", "👎", "🔥", "❤️"]:
+                    await msg.add_reaction(emoji)
+
+        except Exception as exc:
+            logger.error(f"Erreur post_scouting_digest: {exc}", exc_info=True)
 
     async def post_momentum_alert(
         self,
