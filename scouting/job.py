@@ -142,18 +142,24 @@ class ScoutingJob:
                     if followers is not None and followers > STEAM_FOLLOWERS_CAP:
                         continue
                     genres = suggestion.get("genres", [])
-                    signal = (
-                        f"Jeu Coming Soon détecté sur Steam ({', '.join(genres[:2])})"
+                    age_bonus, age_reason = self._age_score(
+                        app_id, followers or 0
                     )
-                    if followers is not None and followers > 0:
-                        signal = f"{followers} followers Steam — Coming Soon"
+                    score = 20 + age_bonus  # base 20 + bonus d'âge
+                    if age_reason:
+                        signal = f"{age_reason} — Coming Soon"
+                    else:
+                        signal = (
+                            "Jeu Coming Soon détecté sur Steam "
+                            f"({', '.join(genres[:2])})"
+                        )
                     candidates.append(
                         {
                             "source": "steam",
                             "app_id": app_id,
                             "name": suggestion.get("name", ""),
                             "url": suggestion.get("steam_url", ""),
-                            "score": 20,
+                            "score": score,
                             "description": suggestion.get("short_description", ""),
                             "genres": genres,
                             "release_date": suggestion.get("release_date", "") or "",
@@ -290,6 +296,63 @@ class ScoutingJob:
             logger.error("Échec de la collecte Reddit", exc_info=True)
             return []
         return candidates
+
+    def _age_score(self, app_id: int, followers: int) -> tuple[int, str]:
+        """Score basé sur le ratio followers/âge de la page Steam.
+
+        Utilise l'App ID comme proxy d'âge (les IDs sont séquentiels) : plus
+        de followers sur une page récente vaut davantage que les mêmes
+        followers sur une page ancienne.
+
+        Tranches d'âge :
+        - app_id >= 3_000_000 → très récente (2024-2025)
+        - app_id >= 2_000_000 → récente (2022-2023)
+        - app_id >= 1_000_000 → moyenne (2019-2021)
+        - app_id <  1_000_000 → ancienne (avant 2019)
+
+        Retourne ``(score, reason)``. ``reason`` est vide si ``score == 0``.
+        """
+        if app_id >= 3_000_000:
+            label = "page très récente"
+            if followers >= 500:
+                score = 40
+            elif followers >= 100:
+                score = 25
+            elif followers >= 50:
+                score = 15
+            elif followers > 0:
+                score = 5
+            else:
+                score = 0
+        elif app_id >= 2_000_000:
+            label = "page récente"
+            if followers >= 2000:
+                score = 30
+            elif followers >= 500:
+                score = 20
+            elif followers >= 100:
+                score = 10
+            else:
+                score = 0
+        elif app_id >= 1_000_000:
+            label = "page Steam"
+            if followers >= 5000:
+                score = 20
+            elif followers >= 2000:
+                score = 10
+            else:
+                score = 0
+        else:
+            label = "page ancienne"
+            if followers >= 10000:
+                score = 10
+            else:
+                score = 0
+
+        if score == 0:
+            return 0, ""
+        reason = f"{label} (app #{app_id}) avec {followers} followers"
+        return score, reason
 
     async def _steam_followers(
         self, app_id: int, session: aiohttp.ClientSession
