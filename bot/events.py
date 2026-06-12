@@ -435,3 +435,25 @@ async def suggest(ctx):
 async def suggest_error(ctx, error):
     if isinstance(error, commands.CommandOnCooldown):
         await ctx.send(f"⏳ Réessaie dans {error.retry_after:.0f}s.")
+
+
+@bot.command(name="scout")
+@commands.check(lambda ctx: ctx.channel.id == DISCORD_CMD_CHANNEL_ID)
+async def scout(ctx):
+    """Déclenche manuellement le ScoutingJob."""
+    await ctx.send("🔍 ScoutingJob en cours...")
+    try:
+        from scouting.job import ScoutingJob
+        job = ScoutingJob()
+        await job.run()
+        job.close()
+        await ctx.send("✅ ScoutingJob terminé.")
+    except Exception as exc:
+        logger.error(f"ScoutingJob manuel — ÉCHEC : {exc}", exc_info=True)
+        await ctx.send(f"❌ Échec : {exc}")
+
+
+@scout.error
+async def scout_error(ctx, error):
+    if isinstance(error, commands.CheckFailure):
+        pass  # Silent — wrong channel

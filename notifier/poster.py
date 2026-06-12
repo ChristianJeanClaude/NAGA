@@ -27,10 +27,19 @@ class DiscordPoster:
     ) -> None:
         try:
             target_id = channel_id or self._channel_id
+
+            # bot.get_channel() only works if bot is connected
+            # Try get_channel first, fall back to fetch_channel
             channel = bot.get_channel(target_id)
             if channel is None:
-                logger.warning(f"Channel {target_id} introuvable")
-                return
+                try:
+                    channel = await bot.fetch_channel(target_id)
+                except Exception:
+                    logger.warning(
+                        f"Channel {target_id} introuvable — "
+                        f"bot connecté: {not bot.is_closed()}"
+                    )
+                    return
 
             for candidate in candidates:
                 embed = discord.Embed(
