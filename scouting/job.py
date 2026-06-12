@@ -141,6 +141,12 @@ class ScoutingJob:
                     followers = await self._steam_followers(app_id, session)
                     if followers is not None and followers > STEAM_FOLLOWERS_CAP:
                         continue
+                    genres = suggestion.get("genres", [])
+                    signal = (
+                        f"Jeu Coming Soon détecté sur Steam ({', '.join(genres[:2])})"
+                    )
+                    if followers is not None and followers > 0:
+                        signal = f"{followers} followers Steam — Coming Soon"
                     candidates.append(
                         {
                             "source": "steam",
@@ -149,10 +155,11 @@ class ScoutingJob:
                             "url": suggestion.get("steam_url", ""),
                             "score": 20,
                             "description": suggestion.get("short_description", ""),
-                            "genres": suggestion.get("genres", []),
+                            "genres": genres,
                             "release_date": suggestion.get("release_date", "") or "",
                             "post_id": str(app_id),
                             "author": suggestion.get("developer", ""),
+                            "signal": signal,
                         }
                     )
         except Exception:
@@ -191,6 +198,9 @@ class ScoutingJob:
                         score += 30
 
                     name, url = await self._name_and_url(app_id, session)
+                    signal = (
+                        f"Post Bluesky — {post.like_count} likes (@{post.author})"
+                    )
                     candidates.append(
                         {
                             "source": "bluesky",
@@ -203,6 +213,7 @@ class ScoutingJob:
                             "release_date": "",
                             "post_id": post.id,
                             "author": post.author,
+                            "signal": signal,
                         }
                     )
         except Exception:
@@ -257,6 +268,9 @@ class ScoutingJob:
 
                     name, url = await self._name_and_url(app_id, session)
                     description = (best.selftext or best.title or "")[:200]
+                    signal = (
+                        f"Post Reddit — score {best.score} (r/{best.subreddit})"
+                    )
                     candidates.append(
                         {
                             "source": "reddit",
@@ -269,6 +283,7 @@ class ScoutingJob:
                             "release_date": "",
                             "post_id": best.id,
                             "author": best.author,
+                            "signal": signal,
                         }
                     )
         except Exception:

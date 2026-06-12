@@ -55,6 +55,7 @@ class GameData:
     momentum_score: int | None = None
     momentum_post: str | None = None   # URL du post viral
     momentum_stat: str | None = None   # Ex: "+45% followers cette semaine"
+    signal: str | None = None  # Ex: "+150 followers en 7 jours pour une page de 3 semaines"
 
     # --- Computed ---
     relevance_score: int = 0  # 0-100, voir services.scoring
@@ -165,6 +166,7 @@ class GameData:
         add_number("Momentum Score", self.momentum_score)
         add_url("Momentum Post", self.momentum_post)
         add_text("Momentum Stat", self.momentum_stat)
+        add_text("Signal", self.signal)
 
         # --- Computed ---
         if self.relevance_score:

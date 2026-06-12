@@ -68,6 +68,12 @@ class DiscordPoster:
                     value=candidate.get("release_date", "N/A"),
                     inline=True,
                 )
+                if candidate.get("signal"):
+                    embed.add_field(
+                        name="Signal",
+                        value=candidate["signal"],
+                        inline=False,
+                    )
                 embed.set_footer(text="NAGA Scout Bot • Auto-scouting 🤖")
 
                 if candidate.get("url"):
