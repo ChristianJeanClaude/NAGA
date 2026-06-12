@@ -20,6 +20,7 @@ from clients.bluesky import BlueskyClient, BlueskyPost
 from notifier.poster import DiscordPoster
 from notion.reader import NotionReader
 from services.cache import init_db
+from services.gamalytic import get_wishlist_data
 from services.notion import get_all_app_ids
 from services.steam import HEADERS, STEAM_STORE_URL, extract_app_id
 from services.suggest import (
@@ -136,18 +137,41 @@ class ScoutingJob:
                     max_results=10,
                     hashtags=profile.get("hashtags", []),
                 )
+                # Gamalytic s'appuie sur Playwright (~5-8s par jeu) : on limite
+                # le scraping aux 5 premiers candidats retenus.
+                gamalytic_calls = 0
                 for suggestion in suggestions:
                     app_id = suggestion["app_id"]
                     followers = await self._steam_followers(app_id, session)
                     if followers is not None and followers > STEAM_FOLLOWERS_CAP:
                         continue
                     genres = suggestion.get("genres", [])
+
+                    if gamalytic_calls < 5:
+                        logger.info(f"Gamalytic scraping pour app_id={app_id}...")
+                        wishlist_data = await get_wishlist_data(app_id)
+                        gamalytic_calls += 1
+                    else:
+                        wishlist_data = {
+                            "wishlists": None,
+                            "daily_additions": None,
+                            "followers": None,
+                        }
+                    wishlists = wishlist_data.get("wishlists")
+
+                    wish_bonus, wish_reason = self._wishlist_score(wishlists)
                     age_bonus, age_reason = self._age_score(
                         app_id, followers or 0
                     )
-                    score = 20 + age_bonus  # base 20 + bonus d'âge
+                    score = 20 + age_bonus + wish_bonus  # base 20 + bonus
+
+                    parts = []
+                    if wish_reason:
+                        parts.append(wish_reason)
                     if age_reason:
-                        signal = f"{age_reason} — Coming Soon"
+                        parts.append(age_reason)
+                    if parts:
+                        signal = " — ".join(parts) + " (Coming Soon)"
                     else:
                         signal = (
                             "Jeu Coming Soon détecté sur Steam "
@@ -296,6 +320,33 @@ class ScoutingJob:
             logger.error("Échec de la collecte Reddit", exc_info=True)
             return []
         return candidates
+
+    def _wishlist_score(self, wishlists: int | None) -> tuple[int, str]:
+        """Score basé sur le nombre de wishlists Gamalytic.
+
+        Retourne ``(score, reason)``. ``reason`` est vide si ``score == 0``
+        (ou si ``wishlists`` est ``None`` / < 100).
+        """
+        if wishlists is None:
+            return 0, ""
+        if wishlists >= 10_000:
+            score = 40
+        elif wishlists >= 5_000:
+            score = 30
+        elif wishlists >= 2_000:
+            score = 20
+        elif wishlists >= 1_000:
+            score = 15
+        elif wishlists >= 500:
+            score = 10
+        elif wishlists >= 100:
+            score = 5
+        else:
+            score = 0
+
+        if score == 0:
+            return 0, ""
+        return score, f"page avec {wishlists:,} wishlists"
 
     def _age_score(self, app_id: int, followers: int) -> tuple[int, str]:
         """Score basé sur le ratio followers/âge de la page Steam.
