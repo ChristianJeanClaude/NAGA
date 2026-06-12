@@ -1,21 +1,12 @@
 """Scraping Gamalytic pour récupérer les wishlists des jeux non sortis."""
 
 import logging
-import re
 
 from playwright.async_api import async_playwright
 
 logger = logging.getLogger(__name__)
 
 GAMALYTIC_URL = "https://gamalytic.com/game/{app_id}"
-
-# Mots-clés (insensibles à la casse) cherchés dans le texte de la page pour
-# rattacher une valeur numérique à chaque métrique.
-_METRIC_KEYWORDS = {
-    "wishlists": ("wishlist",),
-    "daily_additions": ("daily addition", "daily wishlist", "daily"),
-    "followers": ("follower",),
-}
 
 
 async def get_wishlist_data(app_id: int) -> dict:
@@ -33,12 +24,29 @@ async def get_wishlist_data(app_id: int) -> dict:
     url = GAMALYTIC_URL.format(app_id=app_id)
     try:
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(headless=True)
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=["--disable-blink-features=AutomationControlled"],
+            )
             try:
-                page = await browser.new_page()
-                await page.goto(url)
-                await page.wait_for_timeout(5000)
-                body_text = await page.inner_text("body")
+                context = await browser.new_context(
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/125.0.0.0 Safari/537.36"
+                    ),
+                    viewport={"width": 1280, "height": 720},
+                )
+                page = await context.new_page()
+                await page.add_init_script(
+                    "Object.defineProperty(navigator, 'webdriver', "
+                    "{get: () => undefined})"
+                )
+                await page.goto(
+                    url, wait_until="domcontentloaded", timeout=30000
+                )
+                await page.wait_for_timeout(8000)
+                text = await page.inner_text("body")
             finally:
                 await browser.close()
     except Exception:
@@ -48,28 +56,19 @@ async def get_wishlist_data(app_id: int) -> dict:
         return empty
 
     result = dict(empty)
-    for metric, keywords in _METRIC_KEYWORDS.items():
-        result[metric] = _extract_metric(body_text, keywords)
+    lines = text.split("\n")
+    for line in lines:
+        line = line.strip()
+        if "Outstanding wishlists:" in line:
+            val = line.replace("Outstanding wishlists:", "").strip()
+            result["wishlists"] = _parse_number(val)
+        elif "Daily wishlist additions:" in line:
+            val = line.replace("Daily wishlist additions:", "").strip()
+            result["daily_additions"] = _parse_number(val)
+        elif line.startswith("Followers:") and result["followers"] is None:
+            val = line.replace("Followers:", "").strip()
+            result["followers"] = _parse_number(val)
     return result
-
-
-def _extract_metric(text: str, keywords: tuple[str, ...]) -> int | None:
-    """Cherche un nombre adjacent à l'un des ``keywords`` dans ``text``.
-
-    Examine chaque ligne contenant un mot-clé et renvoie le premier nombre
-    parseable trouvé sur cette ligne. ``None`` si rien n'est trouvé.
-    """
-    if not text:
-        return None
-    for line in text.splitlines():
-        lowered = line.lower()
-        if not any(keyword in lowered for keyword in keywords):
-            continue
-        for token in re.findall(r"[\d.,]+\s*[kKmM]?", line):
-            value = _parse_number(token)
-            if value is not None:
-                return value
-    return None
 
 
 def _parse_number(text: str) -> int | None:
