@@ -23,7 +23,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import discord
@@ -45,8 +45,10 @@ MESSAGE_IDS_PROP = "Message IDs"
 THREAD_ID_PROP = "Thread ID"
 
 STEAM_API = "https://store.steampowered.com/api/appdetails"
+# Nombre de jours avant régénération forcée du résumé Notion IA d'un lead.
+SUMMARY_REFRESH_DAYS = 14
 
-URL_RE = re.compile(r"https?://\S+")
+URL_RE = re.compile(r"https?://[^\s\)>]+")
 STEAM_APP_RE = re.compile(r"store\.steampowered\.com/app/(\d+)(?:/([^/?\s]+))?")
 STEAM_NEWS_RE = re.compile(r"store\.steampowered\.com/news/app/(\d+)")
 _STEAM_PREVIEW_LINE_RE = re.compile(r"^(?:Steam|>A_|Release Date|Kickstarter)", re.IGNORECASE)
@@ -61,6 +63,7 @@ MSG_MARKER_RE = re.compile(r"⟦msg:(\d+)⟧")
 def log(message):
     """Affiche un message d'avancement sur la sortie standard."""
     print(message, flush=True)
+
 
 
 def load_env_file(path, required):
@@ -182,6 +185,14 @@ def build_message_record(message):
     links = extract_links(text)
     steam_links = extract_steam_links(links)
 
+    embed_parts = []
+    for embed in getattr(message, "embeds", []):
+        if embed.title:
+            embed_parts.append(embed.title)
+        if embed.description:
+            embed_parts.append(embed.description)
+    embed_text = "\n".join(embed_parts)
+
     return {
         "message_id": str(message.id),
         "channel_id": str(message.channel.id),
@@ -192,6 +203,7 @@ def build_message_record(message):
             "display_name": message.author.display_name,
         },
         "text": text,
+        "embed_text": embed_text,
         "links": links,
         "steam_links": steam_links,
         "attachments": [
@@ -240,15 +252,36 @@ def clean_message_text(text, author_display_name, timestamp):
 
 KICKSTARTER_RE = re.compile(r"kickstarter\.com", re.IGNORECASE)
 PITCH_RE = re.compile(r"docs\.google\.com|pitch|\.pdf", re.IGNORECASE)
+_GOOGLE_DOCS_RE = re.compile(r"docs\.google\.com", re.IGNORECASE)
+YOUTUBE_RE = re.compile(r"youtube\.com|youtu\.be", re.IGNORECASE)
+TWITTER_RE = re.compile(r"x\.com|twitter\.com", re.IGNORECASE)
 
-def _sort_liens(liens):
+
+def _is_exec_context(url, raw_text):
+    """Vrai si 'exec' apparaît dans les 60 chars autour de url dans raw_text."""
+    idx = raw_text.find(url)
+    if idx == -1:
+        return False
+    start = max(0, idx - 60)
+    end = min(len(raw_text), idx + len(url) + 150)
+    return "exec" in raw_text[start:end].lower()
+
+
+def _sort_liens(liens, raw_text=""):
     """Répartit les liens dédupliqués par catégorie (première correspondance).
 
-    Retourne (steam_url, kickstarter, pitch_deck, autres_steam, autres).
-    Le premier lien Steam va dans steam_url ; les suivants dans autres_steam
-    (ils ne tombent pas dans autres).
+    Retourne (steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters,
+              website_studio, autres_steam, autres).
+    - Premier Steam → steam_url ; suivants → autres_steam.
+    - docs.google.com + contexte 'exec' → exec_docs, sinon → pitch_decks.
+    - YouTube / Twitter : tous dans leurs listes respectives.
+    - Tout autre https sans catégorie connue → website_studio (premier), puis autres.
     """
-    steam_url = kickstarter = pitch_deck = None
+    steam_url = kickstarter = website_studio = None
+    pitch_decks = []
+    exec_docs = []
+    youtubes = []
+    twitters = []
     autres_steam = []
     autres = []
     for url in dict.fromkeys(liens):
@@ -264,20 +297,33 @@ def _sort_liens(liens):
         elif KICKSTARTER_RE.search(url):
             if kickstarter is None:
                 kickstarter = url
-        elif pitch_deck is None and PITCH_RE.search(url):
-            pitch_deck = url
+        elif PITCH_RE.search(url):
+            if _GOOGLE_DOCS_RE.search(url) and raw_text and _is_exec_context(url, raw_text):
+                exec_docs.append(url)
+            else:
+                pitch_decks.append(url)
+        elif YOUTUBE_RE.search(url):
+            youtubes.append(url)
+        elif TWITTER_RE.search(url):
+            twitters.append(url)
+        elif url.startswith("https://"):
+            if website_studio is None:
+                website_studio = url
+            else:
+                autres.append(url)
         else:
             autres.append(url)
-    return steam_url, kickstarter, pitch_deck, autres_steam, autres
+    return steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters, website_studio, autres_steam, autres
 
 
-def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tags=None, game=None):
+def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tags=None, game=None, raw_text=""):
     """Construit le dict attendu par notion_leads.push_to_notion pour un thread.
 
     Agrège la conversation du thread ; déduplique et trie les liens par catégorie ;
     tronque « messages » et « liens » à la limite Notion.
+    raw_text : texte brut des messages (URLs incluses) pour la détection exec_doc.
     """
-    steam_url, kickstarter, pitch_deck, autres_steam, autres = _sort_liens(liens)
+    steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters, website_studio, autres_steam, autres = _sort_liens(liens, raw_text)
     payload = {
         "nom_du_jeu": title,
         "source": "Discord #leads",
@@ -294,8 +340,16 @@ def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tag
         payload["autres_steam_urls"] = "\n".join(autres_steam)[:LEAD_TEXT_LIMIT]
     if kickstarter:
         payload["kickstarter"] = kickstarter
-    if pitch_deck:
-        payload["pitch_deck"] = pitch_deck
+    if pitch_decks:
+        payload["pitch_decks"] = pitch_decks
+    if exec_docs:
+        payload["exec_docs"] = exec_docs
+    if youtubes:
+        payload["youtubes"] = youtubes
+    if twitters:
+        payload["twitters"] = twitters
+    if website_studio:
+        payload["website_studio"] = website_studio
     if thread_id is not None:
         payload["thread_id"] = str(thread_id)
     if game:
@@ -615,6 +669,8 @@ class NagaScraperBot(discord.Client):
         # Conversation agrégée par thread pour la base Leads :
         # {thread_id: {"title", "messages":[…], "liens":[…], "pieces":[…], "date"}}
         self._thread_leads = {}
+        # {thread_id: page_id} pour le refresh des résumés IA après scraping.
+        self._lead_page_ids = {}
 
     async def on_ready(self):
         log(f"Connecté en tant que {self.user} — scraping de l'historique…")
@@ -636,6 +692,7 @@ class NagaScraperBot(discord.Client):
         else:
             count += await self._scrape_thread(channel)
         log(f"Historique traité : {count} message(s). Écoute en temps réel active.")
+        await self._refresh_lead_summaries()
 
     async def _scrape_thread(self, channel):
         """Parcourt tout l'historique d'un thread/salon et retourne le nombre traité."""
@@ -749,7 +806,7 @@ class NagaScraperBot(discord.Client):
     def _accumulate_lead(self, thread_id, title, record, tags=None):
         """Ajoute un message à la conversation agrégée du thread (base Leads)."""
         acc = self._thread_leads.setdefault(
-            thread_id, {"title": title, "messages": [], "liens": [], "pieces": [], "tags": [], "game": None}
+            thread_id, {"title": title, "messages": [], "raw_texts": [], "liens": [], "pieces": [], "tags": [], "game": None}
         )
         acc["title"] = title
         if tags is not None:
@@ -759,6 +816,9 @@ class NagaScraperBot(discord.Client):
         acc["messages"].append(
             clean_message_text(record["text"], record["author"]["display_name"], record["timestamp"])
         )
+        raw = record["text"] or ""
+        embed = record.get("embed_text", "")
+        acc["raw_texts"].append(f"{raw}\n{embed}".strip())
         acc["liens"].extend(record["links"])
         acc["pieces"].extend(att["url"] for att in record["attachments"])
         acc["date"] = record["timestamp"]
@@ -775,12 +835,47 @@ class NagaScraperBot(discord.Client):
             thread_id=thread_id,
             tags=acc.get("tags") or None,
             game=acc.get("game"),
+            raw_text="\n\n".join(acc.get("raw_texts", [])),
         )
         try:
-            self._push_lead(data)
+            result = self._push_lead(data)
+            self._lead_page_ids[thread_id] = result["id"]
             log(f"Lead poussé : « {acc['title']} ».")
         except Exception as exc:  # noqa: BLE001 — isole tout échec du module tiers
             log(f"Échec push Leads pour « {acc['title']} » : {exc}")
+
+    async def _refresh_lead_summaries(self):
+        """Force le remplissage auto Notion IA sur les leads non rafraîchis depuis SUMMARY_REFRESH_DAYS.
+
+        Re-écrit la colonne Messages avec son contenu actuel pour déclencher le remplissage
+        automatique Notion IA configuré sur la colonne Summary, puis stamp Dernier résumé.
+        """
+        if self._push_lead is None or not self._lead_page_ids:
+            return
+        import notion_leads
+        today = datetime.now(timezone.utc).date()
+        refreshed = 0
+        for thread_id, page_id in self._lead_page_ids.items():
+            try:
+                info = await asyncio.to_thread(notion_leads.get_page_summary_info, page_id)
+                dernier = info.get("dernier_resume")
+                if dernier:
+                    last_date = datetime.fromisoformat(dernier[:10]).date()
+                    if (today - last_date).days < SUMMARY_REFRESH_DAYS:
+                        continue
+                acc = self._thread_leads.get(thread_id)
+                if not acc:
+                    continue
+                messages_text = "\n\n".join(acc["messages"])
+                await asyncio.to_thread(
+                    notion_leads.trigger_ai_summary, page_id, messages_text, today.isoformat()
+                )
+                refreshed += 1
+                log(f"Remplissage Notion IA déclenché pour la page lead {page_id}.")
+            except Exception as exc:  # noqa: BLE001
+                log(f"Échec déclenchement résumé pour thread {thread_id} : {exc}")
+        if refreshed:
+            log(f"Résumés Notion IA : {refreshed} lead(s) déclenchés.")
 
 
 async def main():
@@ -802,6 +897,7 @@ async def main():
     if leads_token:
         os.environ["NOTION_TOKEN_LEADS"] = leads_token
         import notion_leads
+        await asyncio.to_thread(notion_leads.ensure_schema)
         push_lead = notion_leads.push_to_notion
         log("Push vers la base Leads activé.")
     else:

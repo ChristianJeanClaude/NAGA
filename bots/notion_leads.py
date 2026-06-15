@@ -84,8 +84,14 @@ def _build_properties(data: dict) -> dict:
         props["Steam URL"] = {"url": data["steam_url"]}
     if data.get("kickstarter"):
         props["Kickstarter"] = {"url": data["kickstarter"]}
-    if data.get("pitch_deck"):
-        props["Pitch Deck"] = {"url": data["pitch_deck"]}
+    if data.get("pitch_decks"):
+        props["Pitch Deck"] = {"rich_text": [{"text": {"content": "\n".join(data["pitch_decks"])[:2000]}}]}
+    if data.get("exec_docs"):
+        props["Exec Doc"] = {"rich_text": [{"text": {"content": "\n".join(data["exec_docs"])[:2000]}}]}
+    if data.get("youtubes"):
+        props["YouTube"] = {"rich_text": [{"text": {"content": "\n".join(data["youtubes"])[:2000]}}]}
+    if data.get("twitters"):
+        props["Twitter"] = {"rich_text": [{"text": {"content": "\n".join(data["twitters"])[:2000]}}]}
     if data.get("autres_steam_urls"):
         props["Autres Steam URLs"] = {"rich_text": [{"text": {"content": data["autres_steam_urls"]}}]}
     if data.get("studio"):
@@ -98,6 +104,10 @@ def _build_properties(data: dict) -> dict:
         props["Email"] = {"email": data["email"]}
     if data.get("tags"):
         props["Tags"] = {"multi_select": [{"name": t} for t in data["tags"]]}
+    if data.get("summary"):
+        props["Summary"] = {"rich_text": [{"text": {"content": data["summary"][:2000]}}]}
+    if data.get("dernier_resume"):
+        props["Dernier résumé"] = {"date": {"start": data["dernier_resume"]}}
     return props
 
 
@@ -156,6 +166,61 @@ def push_to_notion(data: dict) -> dict:
             "properties": properties,
         })
         return {"action": "created", "id": page["id"]}
+
+
+def ensure_schema() -> None:
+    """Crée Summary et Dernier résumé dans la base Leads si elles sont absentes."""
+    db = _request("GET", f"/databases/{DB_ID}")
+    existing = db.get("properties", {})
+    patch = {}
+    if "Summary" not in existing:
+        patch["Summary"] = {"rich_text": {}}
+    if "Dernier résumé" not in existing:
+        patch["Dernier résumé"] = {"date": {}}
+    if "Pitch Deck" not in existing:
+        patch["Pitch Deck"] = {"rich_text": {}}
+    if "Exec Doc" not in existing:
+        patch["Exec Doc"] = {"rich_text": {}}
+    if "YouTube" not in existing:
+        patch["YouTube"] = {"rich_text": {}}
+    if "Twitter" not in existing:
+        patch["Twitter"] = {"rich_text": {}}
+    if patch:
+        _request("PATCH", f"/databases/{DB_ID}", {"properties": patch})
+
+
+def get_page_summary_info(page_id: str) -> dict:
+    """Retourne la date Dernier résumé et le texte Messages d'une page lead."""
+    page = _request("GET", f"/pages/{page_id}")
+    props = page.get("properties", {})
+
+    date_prop = props.get("Dernier résumé", {})
+    dernier_resume = (date_prop.get("date") or {}).get("start")
+
+    messages_prop = props.get("Messages", {})
+    messages = "".join(t.get("plain_text", "") for t in messages_prop.get("rich_text", []))
+
+    return {"page_id": page_id, "dernier_resume": dernier_resume, "messages": messages}
+
+
+def update_summary(page_id: str, summary: str, date_str: str) -> None:
+    """Met à jour Summary et Dernier résumé sur une page lead."""
+    _request("PATCH", f"/pages/{page_id}", {"properties": {
+        "Summary": {"rich_text": [{"text": {"content": summary[:2000]}}]},
+        "Dernier résumé": {"date": {"start": date_str}},
+    }})
+
+
+def trigger_ai_summary(page_id: str, messages_text: str, date_str: str) -> None:
+    """Re-écrit Messages pour déclencher le remplissage auto Notion IA sur Summary.
+
+    Notion IA recalcule Summary automatiquement quand sa source (Messages) change.
+    Stamp Dernier résumé dans le même appel pour tracker la dernière régénération.
+    """
+    _request("PATCH", f"/pages/{page_id}", {"properties": {
+        "Messages": {"rich_text": [{"text": {"content": messages_text[:2000]}}]},
+        "Dernier résumé": {"date": {"start": date_str}},
+    }})
 
 
 if __name__ == "__main__":
