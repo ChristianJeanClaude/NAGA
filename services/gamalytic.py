@@ -1,6 +1,8 @@
 """Scraping Gamalytic pour récupérer les wishlists des jeux non sortis."""
 
 import logging
+import os
+import shutil
 
 from playwright.async_api import async_playwright
 
@@ -24,10 +26,29 @@ async def get_wishlist_data(app_id: int) -> dict:
     url = GAMALYTIC_URL.format(app_id=app_id)
     try:
         async with async_playwright() as playwright:
-            browser = await playwright.chromium.launch(
-                headless=True,
-                args=["--disable-blink-features=AutomationControlled"],
+            # Sur Railway/Nix, Chromium est fourni à un chemin système : on le
+            # détecte plutôt que d'utiliser le binaire téléchargé par Playwright
+            # (qui ne trouve pas ses .so sous Nix).
+            chromium_path = (
+                shutil.which("chromium")
+                or shutil.which("chromium-browser")
+                or shutil.which("google-chrome")
+                or os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
             )
+
+            launch_kwargs = {
+                "headless": True,
+                "args": [
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                ],
+            }
+            if chromium_path:
+                launch_kwargs["executable_path"] = chromium_path
+
+            browser = await playwright.chromium.launch(**launch_kwargs)
             try:
                 context = await browser.new_context(
                     user_agent=(
