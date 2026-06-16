@@ -126,27 +126,23 @@ class GameData:
                 props[name] = {"date": {"start": value}}
 
         # --- Identifiers ---
-        add_title("Game", self.name)
+        add_title("Name", self.name)
         add_number("Steam App ID", self.app_id)
-        add_url("Steam URL", self.steam_url)
+        add_url("URL", self.steam_url)
 
         # --- Steam API ---
-        add_text("Description", self.short_description)
+        add_text("Short Description", self.short_description)
         add_text("Developer", self.developer)
-        add_multi_select("Genres", self.genres)
-        add_url("Website", self.website)
-        # release_date est brut ("21 Sep, 2023") : on le convertit en ISO 8601.
-        add_date("Release Date", self._parse_steam_date(self.release_date))
-
-        # --- Steam API (enrichissement) ---
-        add_url("Trailer", self.trailer)
+        add_multi_select("Genre", self.genres)
+        add_url("website", self.website)
 
         # --- Scraping (store page) ---
-        add_multi_select("Tags", self.tags)
+        # Notion limite la colonne Tags : on n'envoie que les 4 premiers.
+        add_multi_select("Tags", self.tags[:4])
         add_select("Review Score", self.review_score)
         add_number("Review Count", self.review_count)
-        add_url("Twitter URL", self.twitter_url)
-        add_url("Discord URL", self.discord_url)
+        add_url("twitter", self.twitter_url)
+        add_url("Discord", self.discord_url)
 
         # --- SteamSpy ---
         add_text("Owners Estimate", self.owners_estimate)
@@ -161,6 +157,7 @@ class GameData:
         # --- Discord context ---
         add_text("Scouted By", self.scouted_by)
         add_date("Scouted At", self.scouted_at)
+        add_url("Discord Message URL", self.discord_message_url)
 
         # --- Momentum ---
         add_number("Momentum Score", self.momentum_score)

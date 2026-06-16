@@ -105,6 +105,39 @@ async def _send_to_scout_log(embed, view=None):
         logger.error(f"Failed to send to scout log channel: {e}")
 
 
+async def _mark_outreached(app_id: int) -> None:
+    """Coche la case "Outreached?" de la fiche Notion pour cet ``app_id``.
+
+    Best-effort : journalise au niveau INFO en cas de succès, WARNING/ERROR en
+    cas d'échec. Ne lève jamais.
+    """
+    try:
+        import os
+
+        from dotenv import load_dotenv
+        from notion_client import AsyncClient
+
+        from services.notion import get_page_id
+
+        load_dotenv()
+
+        page_id = await get_page_id(app_id)
+        if page_id is None:
+            logger.warning(
+                f"✅ Outreached: page Notion introuvable pour app_id={app_id}"
+            )
+            return
+
+        notion = AsyncClient(auth=os.environ.get("NOTION_TOKEN", ""))
+        await notion.pages.update(
+            page_id=page_id,
+            properties={"Outreached?": {"checkbox": True}},
+        )
+        logger.info(f"✅ Outreached mis à jour pour app_id={app_id}")
+    except Exception as exc:
+        logger.error(f"Erreur Outreached pour app_id={app_id}: {exc}")
+
+
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     """Déclenché à chaque réaction. Pipeline de scouting.
@@ -159,6 +192,19 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             payload.channel_id,
             exc_info=True,
         )
+        return
+
+    # Réaction ✅ → marquer "Outreached?" dans Notion. Doit s'exécuter AVANT le
+    # seuil de 2 réactions : un seul ✅ suffit à déclencher l'Outreach.
+    if str(payload.emoji) == "✅":
+        # Extraction de l'App ID depuis le contenu ou l'embed.
+        app_id = extract_app_id(message.content)
+        if app_id is None and message.embeds:
+            app_id = extract_app_id(message.embeds[0].url or "")
+        if app_id is None:
+            return
+
+        await _mark_outreached(app_id)
         return
 
     app_id = extract_app_id(message.content)

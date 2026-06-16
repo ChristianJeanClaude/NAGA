@@ -60,11 +60,6 @@ def test_to_notion_scouted_at_empty_omitted():
     assert "Scouted At" not in game.to_notion_properties()
 
 
-def test_to_notion_trailer_url():
-    game = _make_game(trailer="https://cdn/movie.webm")
-    assert game.to_notion_properties()["Trailer"] == {"url": "https://cdn/movie.webm"}
-
-
 def test_to_notion_trailer_none_omitted():
     game = _make_game(trailer=None)
     assert "Trailer" not in game.to_notion_properties()
@@ -78,13 +73,6 @@ def test_to_notion_followers_number():
 def test_to_notion_followers_none_omitted():
     game = _make_game(followers=None)
     assert "Followers" not in game.to_notion_properties()
-
-
-def test_to_notion_release_date_parsed_to_iso():
-    game = _make_game(release_date="21 Sep, 2023")
-    assert game.to_notion_properties()["Release Date"] == {
-        "date": {"start": "2023-09-21"}
-    }
 
 
 def test_to_notion_release_date_unparseable_omitted():
