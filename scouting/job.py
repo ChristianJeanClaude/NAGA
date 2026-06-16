@@ -9,7 +9,7 @@ pas les autres ni l'exécution globale.
 
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import aiohttp
@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
 TOP_N = 3                    # candidats poussés par run
 SCORE_FLOOR = 10             # score minimum pour être proposé
 STEAM_FOLLOWERS_CAP = 2000   # exclure les jeux > 2000 followers Steam
+MAX_POST_AGE_DAYS = 30       # exclure les posts plus vieux que 30 jours
 DB_PATH = Path("db/scouting.db")
 
 _STEAMSPY_URL = "https://steamspy.com/api.php"
@@ -115,6 +116,15 @@ class ScoutingJob:
             len(candidates),
             len(top_candidates),
         )
+
+    def _is_recent(self, created_utc: float) -> bool:
+        """Indique si le post a été créé dans les ``MAX_POST_AGE_DAYS`` derniers jours.
+
+        ``created_utc`` est un timestamp Unix (float).
+        """
+        cutoff = datetime.now(timezone.utc) - timedelta(days=MAX_POST_AGE_DAYS)
+        post_date = datetime.fromtimestamp(created_utc, tz=timezone.utc)
+        return post_date >= cutoff
 
     async def _collect_steam_candidates(
         self,
@@ -219,6 +229,19 @@ class ScoutingJob:
                     if app_id is None or app_id in known_ids:
                         continue
 
+                    # created_at est une chaîne ISO 8601, pas un timestamp.
+                    try:
+                        post_dt = datetime.fromisoformat(
+                            post.created_at.replace("Z", "+00:00")
+                        )
+                        cutoff = datetime.now(timezone.utc) - timedelta(
+                            days=MAX_POST_AGE_DAYS
+                        )
+                        if post_dt < cutoff:
+                            continue
+                    except Exception:
+                        pass  # on garde le post si la date est illisible
+
                     score = 10
                     if post.like_count >= 10:
                         score += 10
@@ -279,6 +302,9 @@ class ScoutingJob:
                 blob = f"{post.url} {post.title} {post.selftext}"
                 app_id = extract_app_id(blob)
                 if app_id is None or app_id in known_ids:
+                    continue
+                # created_utc est un timestamp Unix (float).
+                if not self._is_recent(post.created_utc):
                     continue
                 by_app.setdefault(app_id, []).append(post)
 

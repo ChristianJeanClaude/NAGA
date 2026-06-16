@@ -10,3 +10,5 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+setup_twitter.py
+twitter_cookies.json
