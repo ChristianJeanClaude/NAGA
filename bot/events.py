@@ -18,7 +18,6 @@ from discord.ext import commands
 
 from config import (
     DISCORD_CHANNEL_ID,
-    DISCORD_CMD_CHANNEL_ID,
     DISCORD_SCOUT_LOG_CHANNEL_ID,
     DISCORD_SUGGEST_CHANNEL_ID,
     NOTION_DATABASE_ID,
@@ -393,13 +392,11 @@ async def rescan(ctx, url: str = None):
 
 
 @bot.command(name="suggest")
-@commands.check(lambda ctx: ctx.channel.id == DISCORD_CMD_CHANNEL_ID)
 @commands.cooldown(1, 300, commands.BucketType.guild)
 async def suggest(ctx):
     """Analyse la base Notion et suggère des jeux indés à venir.
 
-    Réservée au salon de commandes ; poste les résultats dans le salon de
-    suggestions.
+    Poste les résultats dans le salon de suggestions.
     """
     suggest_channel = bot.get_channel(DISCORD_SUGGEST_CHANNEL_ID)
     if suggest_channel is None:
@@ -484,7 +481,6 @@ async def suggest_error(ctx, error):
 
 
 @bot.command(name="scout")
-@commands.check(lambda ctx: ctx.channel.id == DISCORD_CMD_CHANNEL_ID)
 async def scout(ctx):
     """Déclenche manuellement le ScoutingJob."""
     await ctx.send("🔍 ScoutingJob en cours...")
@@ -497,9 +493,3 @@ async def scout(ctx):
     except Exception as exc:
         logger.error(f"ScoutingJob manuel — ÉCHEC : {exc}", exc_info=True)
         await ctx.send(f"❌ Échec : {exc}")
-
-
-@scout.error
-async def scout_error(ctx, error):
-    if isinstance(error, commands.CheckFailure):
-        pass  # Silent — wrong channel
