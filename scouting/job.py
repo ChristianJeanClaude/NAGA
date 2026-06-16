@@ -9,6 +9,7 @@ pas les autres ni l'exécution globale.
 
 import logging
 import os
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -225,7 +226,29 @@ class ScoutingJob:
 
             async with aiohttp.ClientSession(headers=HEADERS) as session:
                 for post in posts:
-                    app_id = extract_app_id(f"{post.text} {post.url}")
+                    # Recherche dans le texte.
+                    app_id = extract_app_id(post.text)
+
+                    # Recherche dans toutes les URLs présentes dans le texte.
+                    if app_id is None:
+                        urls_in_text = re.findall(r"https?://\S+", post.text)
+                        for url in urls_in_text:
+                            app_id = extract_app_id(url)
+                            if app_id:
+                                break
+
+                    # Recherche dans l'URL du post.
+                    if app_id is None:
+                        app_id = extract_app_id(post.url or "")
+
+                    # Repli : lien Steam mentionné en clair dans le texte.
+                    if app_id is None:
+                        steam_mentions = re.findall(
+                            r"store\.steampowered\.com/app/(\d+)", post.text
+                        )
+                        if steam_mentions:
+                            app_id = int(steam_mentions[0])
+
                     if app_id is None or app_id in known_ids:
                         continue
 
@@ -299,8 +322,25 @@ class ScoutingJob:
             # Regroupe les posts par app_id Steam extrait.
             by_app: dict[int, list] = {}
             for post in posts:
-                blob = f"{post.url} {post.title} {post.selftext}"
-                app_id = extract_app_id(blob)
+                # Recherche dans l'URL du post.
+                app_id = extract_app_id(post.url or "")
+
+                # Recherche dans le titre.
+                if app_id is None:
+                    app_id = extract_app_id(post.title)
+
+                # Recherche dans le corps du post.
+                if app_id is None and post.selftext:
+                    app_id = extract_app_id(post.selftext)
+
+                # Repli : lien Steam mentionné en clair dans le corps.
+                if app_id is None and post.selftext:
+                    steam_mentions = re.findall(
+                        r"store\.steampowered\.com/app/(\d+)", post.selftext
+                    )
+                    if steam_mentions:
+                        app_id = int(steam_mentions[0])
+
                 if app_id is None or app_id in known_ids:
                     continue
                 # created_utc est un timestamp Unix (float).
