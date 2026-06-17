@@ -163,7 +163,7 @@ class GameData:
         add_number("Momentum Score", self.momentum_score)
         add_url("Momentum Post", self.momentum_post)
         add_text("Momentum Stat", self.momentum_stat)
-        add_text("Signal", self.signal)
+        add_text("Canaux de signal", self.signal)
 
         # --- Computed ---
         if self.relevance_score:
