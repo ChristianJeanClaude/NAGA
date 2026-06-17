@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 _TRACKING_TIME = dt_time(hour=8, minute=0)
 _SCOUTING_TIME = dt_time(hour=10, minute=0)
 _SCOUTING_INTERVAL_DAYS = 2
+OUTREACH_POLL_INTERVAL_MINUTES = 60
 
 
 async def _should_run_today(last_run: datetime | None, interval_days: int) -> bool:
@@ -115,6 +116,18 @@ async def scouting_loop() -> None:
             last_run = datetime.now(timezone.utc)
 
 
+async def outreach_poll_loop() -> None:
+    """
+    Boucle de polling outreach :
+    - Lance run_outreach_poll()
+    - Répète toutes les 60 minutes
+    """
+    from tracking.outreach_poller import run_outreach_poll
+    while True:
+        await run_outreach_poll()
+        await asyncio.sleep(OUTREACH_POLL_INTERVAL_MINUTES * 60)
+
+
 async def start_scheduler() -> None:
     """
     Lance les deux boucles en tâches asyncio parallèles.
@@ -123,9 +136,13 @@ async def start_scheduler() -> None:
     Usage in main.py:
         asyncio.create_task(start_scheduler())
     """
-    logger.info("Scheduler démarré — TrackingJob @08:00 UTC, ScoutingJob @10:00 UTC (J+2)")
+    logger.info(
+        "Scheduler démarré — TrackingJob @08:00 UTC, ScoutingJob @10:00 UTC (J+2), "
+        "OutreachPoll toutes les 60 min"
+    )
     await asyncio.gather(
         tracking_loop(),
         scouting_loop(),
+        outreach_poll_loop(),
         return_exceptions=True,
     )

@@ -4,6 +4,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 
 from dotenv import load_dotenv
 from notion_client import AsyncClient
@@ -17,6 +18,21 @@ logger = logging.getLogger(__name__)
 _TWITTER_HANDLE_RE = re.compile(
     r"(?:twitter\.com|x\.com)/(?:#!/)?@?([^/?#]+)", re.IGNORECASE
 )
+
+
+def _is_after(last_edited_time: str | None, since: datetime) -> bool:
+    """Indique si l'horodatage Notion ``last_edited_time`` est >= ``since``.
+
+    ``last_edited_time`` est une chaîne ISO 8601 (ex. ``"2026-06-17T10:30:00.000Z"``).
+    Retourne ``False`` si l'horodatage est absent ou non analysable.
+    """
+    if not last_edited_time:
+        return False
+    try:
+        parsed = datetime.fromisoformat(last_edited_time.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return parsed >= since
 
 
 def _extract_twitter_handle(url: str | None) -> str | None:
@@ -116,6 +132,67 @@ class NotionReader:
             return []
 
         return games
+
+    async def get_newly_outreached(self, since: datetime) -> list[dict]:
+        """
+        Retourne les pages outreachées modifiées depuis ``since``.
+
+        Filtre côté Notion sur ``Outreached? = True``, puis, côté Python, ne
+        conserve que les pages dont ``last_edited_time`` est >= ``since``.
+
+        Retourne une liste de dicts :
+            [{"page_id": str, "discord_message_url": str | None}, ...]
+
+        Le ``discord_message_url`` provient de la propriété (url)
+        "Discord Message URL". Retourne [] sur toute erreur — ne raise jamais.
+        """
+        pages: list[dict] = []
+        try:
+            filter_ = {
+                "and": [
+                    {"property": "Outreached?", "checkbox": {"equals": True}},
+                ]
+            }
+            cursor = None
+            while True:
+                kwargs = {
+                    "database_id": str(self._database_id),
+                    "page_size": 100,
+                    "filter": filter_,
+                }
+                if cursor:
+                    kwargs["start_cursor"] = cursor
+                response = await self._client.databases.query(**kwargs)
+
+                for page in response.get("results", []):
+                    last_edited = page.get("last_edited_time")
+                    if not _is_after(last_edited, since):
+                        continue
+
+                    props = page.get("properties", {})
+                    discord_message_url = props.get(
+                        "Discord Message URL", {}
+                    ).get("url")
+
+                    pages.append(
+                        {
+                            "page_id": page.get("id", ""),
+                            "discord_message_url": discord_message_url,
+                        }
+                    )
+
+                if response.get("has_more"):
+                    cursor = response.get("next_cursor")
+                else:
+                    break
+        except Exception:
+            logger.error(
+                "Échec de la lecture des jeux outreachés depuis Notion",
+                exc_info=True,
+            )
+            return []
+
+        return pages
 
     async def get_games_to_track_today(self, day_index: int) -> list[TrackedGame]:
         """
