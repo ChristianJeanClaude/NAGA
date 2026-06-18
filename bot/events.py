@@ -18,7 +18,6 @@ from discord.ext import commands
 
 from config import (
     DISCORD_CHANNEL_ID,
-    DISCORD_SCOUT_LOG_CHANNEL_ID,
     DISCORD_SUGGEST_CHANNEL_ID,
     NOTION_DATABASE_ID,
 )
@@ -68,40 +67,13 @@ async def on_message(message: discord.Message) -> None:
 
     existing_url = await find_existing_page(app_id)
     if existing_url:
-        embed = discord.Embed(
-            title="⚠️ Jeu déjà scouté",
-            description="Ce jeu est déjà dans la base Notion.",
-            color=0xFFA500,
-        )
-        embed.add_field(name="Steam App ID", value=str(app_id), inline=True)
-        view = discord.ui.View()
-        view.add_item(
-            discord.ui.Button(
-                label="Voir sur Notion",
-                url=existing_url,
-                style=discord.ButtonStyle.link,
-            )
-        )
-        await message.channel.send(embed=embed, view=view)
+        # Bot silencieux : aucun message Discord, journalisation console seule.
+        logger.info("Jeu déjà scouté (app_id=%s), réactions non ajoutées.", app_id)
         return
 
     # Only add reactions if game is not already scouted
     for emoji in ["👍", "👎"]:
         await message.add_reaction(emoji)
-
-
-async def _send_to_scout_log(embed, view=None):
-    """Publie un embed dans le canal de log de scouting (feed d'audit).
-
-    Toute panne du canal de log est journalisée et avalée pour ne jamais
-    impacter le pipeline de scouting principal.
-    """
-    try:
-        channel = bot.get_channel(DISCORD_SCOUT_LOG_CHANNEL_ID) or \
-                  await bot.fetch_channel(DISCORD_SCOUT_LOG_CHANNEL_ID)
-        await channel.send(embed=embed, view=view)
-    except Exception as e:
-        logger.error(f"Failed to send to scout log channel: {e}")
 
 
 async def _mark_outreached(app_id: int) -> None:

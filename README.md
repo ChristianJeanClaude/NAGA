@@ -22,8 +22,6 @@ duplicate notice, or a command result).
   same game is never scouted twice.
 - **Automatic Notion entry creation** — aggregates metadata from Steam,
   SteamSpy, and the store page into a new Notion page.
-- **Discord embed confirmation** — posts a rich embed (with a "View on Notion"
-  button) to a scout-log channel when a game is scouted.
 - **`!rescan` command** — re-fetches fresh metrics for an existing game and
   updates its Notion page.
 - **`!suggest` command** — analyzes the Notion database to build a genre/tag
@@ -117,7 +115,6 @@ naga-scout-bot/
 |---|---|---|
 | `DISCORD_TOKEN` | Bot authentication token. | [Discord Developer Portal](https://discord.com/developers/applications) → your application → **Bot** → **Reset Token**. |
 | `DISCORD_CHANNEL_ID` | ID of the channel where Steam links are posted and scouted. | Enable **Developer Mode** in Discord (Settings → Advanced), then right-click the channel → **Copy Channel ID**. |
-| `DISCORD_SCOUT_LOG_CHANNEL_ID` | ID of the channel where scout confirmation embeds are posted. | Right-click the log channel → **Copy Channel ID**. |
 | `DISCORD_SUGGEST_CHANNEL_ID` | ID of the channel where `!suggest` results are posted. | Right-click the suggestions channel → **Copy Channel ID**. |
 | `NOTION_TOKEN` | Internal integration secret used to read/write the database. | [Notion Integrations](https://www.notion.so/my-integrations) → **New integration** → copy the **Internal Integration Secret**. Share the database with the integration. |
 | `NOTION_DATABASE_ID` | ID of the target Notion database. | Open the database as a full page; the 32-character ID is in the URL: `notion.so/<workspace>/<DATABASE_ID>?v=...`. |
@@ -186,13 +183,12 @@ channels:
 
 1. A team member posts a Steam store link in the scouting channel.
 2. The bot checks Notion: if the game already exists, it posts a short
-   "already scouted" notice and stops. Otherwise it adds five voting reactions
-   (👍 👎 🔥 ❤️ ✅).
+   "already scouted" notice and stops. Otherwise it adds two voting reactions
+   (👍 👎).
 3. Once **two distinct (non-bot) members** have reacted, the bot fetches the
    game's data from Steam, the store page, and SteamSpy, computes the relevance
-   score, and creates a Notion entry.
-4. A confirmation embed (with a "View on Notion" button) is posted in the
-   scout-log channel.
+   score, and creates a Notion entry. The bot stays silent — no confirmation
+   message is posted; progress is logged to the console only.
 
 ### Commands
 
@@ -233,8 +229,8 @@ Already in Notion?
        yes              no
         │               │
         ▼               ▼
-Post duplicate      Add 5 reactions
-notice; stop        👍 👎 🔥 ❤️ ✅
+Post duplicate      Add 2 reactions
+notice; stop        👍 👎
                         │
                         ▼
             ≥ 2 distinct human reactions
@@ -252,10 +248,7 @@ notice; stop        👍 👎 🔥 ❤️ ✅
                         ▼
             create Notion page
             mark message as processed
-                        │
-                        ▼
-            Post embed to scout-log channel
-            (+ Notion button)
+            (silent — console logging only)
 ```
 
 ## Deployment (Railway)
@@ -298,7 +291,6 @@ Tests are offline by design: there are no network calls. Async tests run under
   `services/retry.py` (`with_retry`), which retries on transient errors with
   delays of 2s, 4s, 8s.
 - **Silent operation** — the bot logs to stdout and only sends Discord messages
-  when there is something meaningful to convey (a scouted game, a duplicate
-  notice, or a command result). Failures in non-critical paths (e.g. posting to
-  the log channel) are logged and swallowed so they never break the pipeline.
+  when there is something meaningful to convey (a command result). Failures in
+  non-critical paths are logged and swallowed so they never break the pipeline.
 ```
