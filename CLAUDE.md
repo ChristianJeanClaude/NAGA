@@ -17,6 +17,7 @@ bots/
   notion_leads.py     — client Notion pour la base Leads (module indépendant)
 tools/
   list_forum_threads.py     — diagnostic : liste les threads du forum cible
+  inspect_leads_db.py       — diagnostic : affiche le schéma de la base Leads (lecture seule)
   migrate_notion_format.py  — migration ponctuelle : marqueurs → propriété Message IDs
 tests/
   test_discord_bot.py — tests des fonctions pures (aucun appel réseau)
@@ -37,9 +38,11 @@ conftest.py           — ajoute bots/ au sys.path pour les imports de test
 Deux fichiers `KEY=VALUE` dans `~` (jamais hardcodés, jamais committés) :
 
 - `~/.env.discord` — `DISCORD_TOKEN`, `DISCORD_CHANNEL_ID`
-- `~/.env.notion` — `NOTION_TOKEN`, `NOTION_PARENT_PAGE_ID`, `NOTION_TOKEN_LEADS` (optionnel)
+- `~/.env.notion` — `NOTION_TOKEN`, `NOTION_PARENT_PAGE_ID`, `NOTION_TOKEN_LEADS` (optionnel), `NOTION_DB_LEADS_ID` (optionnel)
 
-Si `NOTION_TOKEN_LEADS` est absent, le push vers la base Leads est désactivé sans erreur.
+Si `NOTION_TOKEN_LEADS` est absent, le bot retombe sur `NOTION_TOKEN` pour la base Leads (même intégration). Le push n'est désactivé que si aucun token Notion n'est disponible.
+
+`NOTION_DB_LEADS_ID` permet de pointer la base Leads sans toucher au code ; à défaut, l'id par défaut codé en dur dans `bots/notion_leads.py` est utilisé.
 
 ## Commandes de lancement
 
@@ -49,6 +52,9 @@ py bots/discord_bot.py
 
 # Lister les threads du forum (diagnostic, lecture seule)
 py tools/list_forum_threads.py
+
+# Afficher le schéma de la base Notion Leads (diagnostic, lecture seule)
+py tools/inspect_leads_db.py
 
 # Migration ponctuelle des marqueurs d'idempotence (one-shot)
 py tools/migrate_notion_format.py

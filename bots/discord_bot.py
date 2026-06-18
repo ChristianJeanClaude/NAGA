@@ -254,7 +254,15 @@ KICKSTARTER_RE = re.compile(r"kickstarter\.com", re.IGNORECASE)
 PITCH_RE = re.compile(r"docs\.google\.com|pitch|\.pdf", re.IGNORECASE)
 _GOOGLE_DOCS_RE = re.compile(r"docs\.google\.com", re.IGNORECASE)
 YOUTUBE_RE = re.compile(r"youtube\.com|youtu\.be", re.IGNORECASE)
-TWITTER_RE = re.compile(r"x\.com|twitter\.com", re.IGNORECASE)
+# \b devant x.com pour ne pas matcher au milieu d'un domaine (ex. dropbox.com).
+TWITTER_RE = re.compile(r"\bx\.com|twitter\.com", re.IGNORECASE)
+FATHOM_RE = re.compile(r"fathom\.video", re.IGNORECASE)
+DRIVE_RE = re.compile(
+    r"drive\.google\.com|onedrive\.live\.com|1drv\.ms|dropbox\.com|wetransfer\.com|mega\.nz",
+    re.IGNORECASE,
+)
+INSTAGRAM_RE = re.compile(r"instagram\.com", re.IGNORECASE)
+CANVA_RE = re.compile(r"canva\.com|canva\.link", re.IGNORECASE)
 
 
 def _is_exec_context(url, raw_text):
@@ -271,10 +279,10 @@ def _sort_liens(liens, raw_text=""):
     """Répartit les liens dédupliqués par catégorie (première correspondance).
 
     Retourne (steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters,
-              website_studio, autres_steam, autres).
+              fathoms, drives, instagrams, canvas, website_studio, autres_steam, autres).
     - Premier Steam → steam_url ; suivants → autres_steam.
     - docs.google.com + contexte 'exec' → exec_docs, sinon → pitch_decks.
-    - YouTube / Twitter : tous dans leurs listes respectives.
+    - YouTube / Twitter / Fathom / Drive / Instagram / Canva : tous dans leurs listes.
     - Tout autre https sans catégorie connue → website_studio (premier), puis autres.
     """
     steam_url = kickstarter = website_studio = None
@@ -282,6 +290,10 @@ def _sort_liens(liens, raw_text=""):
     exec_docs = []
     youtubes = []
     twitters = []
+    fathoms = []
+    drives = []
+    instagrams = []
+    canvas = []
     autres_steam = []
     autres = []
     for url in dict.fromkeys(liens):
@@ -306,6 +318,14 @@ def _sort_liens(liens, raw_text=""):
             youtubes.append(url)
         elif TWITTER_RE.search(url):
             twitters.append(url)
+        elif FATHOM_RE.search(url):
+            fathoms.append(url)
+        elif DRIVE_RE.search(url):
+            drives.append(url)
+        elif INSTAGRAM_RE.search(url):
+            instagrams.append(url)
+        elif CANVA_RE.search(url):
+            canvas.append(url)
         elif url.startswith("https://"):
             if website_studio is None:
                 website_studio = url
@@ -313,7 +333,7 @@ def _sort_liens(liens, raw_text=""):
                 autres.append(url)
         else:
             autres.append(url)
-    return steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters, website_studio, autres_steam, autres
+    return steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters, fathoms, drives, instagrams, canvas, website_studio, autres_steam, autres
 
 
 def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tags=None, game=None, raw_text=""):
@@ -323,7 +343,7 @@ def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tag
     tronque « messages » et « liens » à la limite Notion.
     raw_text : texte brut des messages (URLs incluses) pour la détection exec_doc.
     """
-    steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters, website_studio, autres_steam, autres = _sort_liens(liens, raw_text)
+    steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters, fathoms, drives, instagrams, canvas, website_studio, autres_steam, autres = _sort_liens(liens, raw_text)
     payload = {
         "nom_du_jeu": title,
         "source": "Discord #leads",
@@ -348,6 +368,14 @@ def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tag
         payload["youtubes"] = youtubes
     if twitters:
         payload["twitters"] = twitters
+    if fathoms:
+        payload["fathoms"] = fathoms
+    if drives:
+        payload["drives"] = drives
+    if instagrams:
+        payload["instagrams"] = instagrams
+    if canvas:
+        payload["canvas"] = canvas
     if website_studio:
         payload["website_studio"] = website_studio
     if thread_id is not None:
@@ -892,16 +920,23 @@ async def main():
 
     # Seconde base Notion (Leads de Djoundounda). Le module lit son token dans
     # NOTION_TOKEN_LEADS à l'import : on renseigne d'abord l'environnement.
+    # À défaut de token dédié, on retombe sur NOTION_TOKEN (même intégration).
     push_lead = None
-    leads_token = notion_env.get("NOTION_TOKEN_LEADS")
+    leads_token = notion_env.get("NOTION_TOKEN_LEADS") or notion_env.get("NOTION_TOKEN")
     if leads_token:
         os.environ["NOTION_TOKEN_LEADS"] = leads_token
+        leads_db_id = notion_env.get("NOTION_DB_LEADS_ID")
+        if leads_db_id:
+            os.environ["NOTION_DB_LEADS_ID"] = leads_db_id
         import notion_leads
         await asyncio.to_thread(notion_leads.ensure_schema)
         push_lead = notion_leads.push_to_notion
-        log("Push vers la base Leads activé.")
+        if notion_env.get("NOTION_TOKEN_LEADS"):
+            log("Push vers la base Leads activé.")
+        else:
+            log("Push vers la base Leads activé (fallback sur NOTION_TOKEN).")
     else:
-        log("NOTION_TOKEN_LEADS absent : push vers la base Leads désactivé.")
+        log("Aucun token Notion disponible : push vers la base Leads désactivé.")
 
     intents = discord.Intents.default()
     intents.message_content = True

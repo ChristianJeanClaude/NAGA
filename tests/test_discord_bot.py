@@ -184,6 +184,37 @@ def test_build_lead_payload_listes_multiples():
     assert "pitch_deck" not in payload
 
 
+def test_build_lead_payload_fathom():
+    f1 = "https://fathom.video/calls/111"
+    f2 = "https://fathom.video/share/222"
+    payload = discord_bot.build_lead_payload(
+        "Jeu", ["m"], [f1, f2, "https://mon-studio.fr"], [], "2026-06-01",
+    )
+    assert payload["fathoms"] == [f1, f2]
+    assert payload["website_studio"] == "https://mon-studio.fr"
+
+
+def test_build_lead_payload_drive():
+    d1 = "https://drive.google.com/drive/folders/aaa"
+    d2 = "https://1drv.ms/f/bbb"
+    payload = discord_bot.build_lead_payload(
+        "Jeu", ["m"], [d1, d2, "https://mon-studio.fr"], [], "2026-06-01",
+    )
+    assert payload["drives"] == [d1, d2]
+    assert payload["website_studio"] == "https://mon-studio.fr"
+
+
+def test_build_lead_payload_instagram_et_canva():
+    insta = "https://www.instagram.com/reel/x/"
+    canva = "https://canva.link/y"
+    payload = discord_bot.build_lead_payload(
+        "Jeu", ["m"], [insta, canva, "https://mon-studio.fr"], [], "2026-06-01",
+    )
+    assert payload["instagrams"] == [insta]
+    assert payload["canvas"] == [canva]
+    assert payload["website_studio"] == "https://mon-studio.fr"
+
+
 def test_build_lead_payload_troncature_2000():
     long_msg = "x" * 5000
     payload = discord_bot.build_lead_payload("Jeu", [long_msg], [], [], "2026-06-01")
@@ -423,11 +454,12 @@ def test_is_exec_context_url_absente():
 
 def _sort(liens, raw_text=""):
     """Raccourci de test pour dépaquetter _sort_liens en dict nommé."""
-    steam, ks, pitch_decks, exec_docs, youtubes, twitters, site, autres_steam, autres = discord_bot._sort_liens(liens, raw_text)
+    steam, ks, pitch_decks, exec_docs, youtubes, twitters, fathoms, drives, instagrams, canvas, site, autres_steam, autres = discord_bot._sort_liens(liens, raw_text)
     return {
         "steam": steam, "kickstarter": ks,
         "pitch_decks": pitch_decks, "exec_docs": exec_docs,
-        "youtubes": youtubes, "twitters": twitters,
+        "youtubes": youtubes, "twitters": twitters, "fathoms": fathoms, "drives": drives,
+        "instagrams": instagrams, "canvas": canvas,
         "website_studio": site, "autres_steam": autres_steam, "autres": autres,
     }
 
@@ -515,6 +547,120 @@ def test_sort_liens_twitter_dedup_liste_complete():
     assert r["autres"] == []
 
 
+def test_sort_liens_fathom_video():
+    r = _sort(["https://fathom.video/calls/12345"])
+    assert r["fathoms"] == ["https://fathom.video/calls/12345"]
+    assert r["website_studio"] is None
+    assert r["autres"] == []
+
+
+def test_sort_liens_fathom_share_link():
+    r = _sort(["https://fathom.video/share/abcDEF"])
+    assert r["fathoms"] == ["https://fathom.video/share/abcDEF"]
+
+
+def test_sort_liens_fathom_dedup_liste_complete():
+    f1 = "https://fathom.video/calls/111"
+    f2 = "https://fathom.video/share/222"
+    r = _sort([f1, f2])
+    assert r["fathoms"] == [f1, f2]
+    assert r["website_studio"] is None
+    assert r["autres"] == []
+
+
+def test_sort_liens_fathom_n_atterrit_pas_dans_website_studio():
+    # Un lien fathom + un vrai site : le fathom ne doit pas voler la place du site.
+    r = _sort(["https://fathom.video/calls/1", "https://mon-studio.fr"])
+    assert r["fathoms"] == ["https://fathom.video/calls/1"]
+    assert r["website_studio"] == "https://mon-studio.fr"
+    assert r["autres"] == []
+
+
+def test_sort_liens_drive_google():
+    r = _sort(["https://drive.google.com/file/d/abc/view?usp=sharing"])
+    assert r["drives"] == ["https://drive.google.com/file/d/abc/view?usp=sharing"]
+    assert r["website_studio"] is None
+    assert r["autres"] == []
+
+
+def test_sort_liens_drive_onedrive_et_dropbox():
+    od = "https://onedrive.live.com/?id=ABC"
+    db = "https://www.dropbox.com/s/xyz/assets.zip"
+    r = _sort([od, db])
+    assert r["drives"] == [od, db]
+    assert r["autres"] == []
+
+
+def test_sort_liens_dropbox_pas_pris_pour_twitter():
+    # Régression : « dropbox.com » contient « x.com » — ne doit pas finir en twitters.
+    r = _sort(["https://www.dropbox.com/s/xyz/assets.zip"])
+    assert r["twitters"] == []
+    assert r["drives"] == ["https://www.dropbox.com/s/xyz/assets.zip"]
+
+
+def test_sort_liens_drive_n_atterrit_pas_dans_website_studio():
+    # Un lien Drive + un vrai site : le Drive ne doit pas voler la place du site.
+    r = _sort(["https://drive.google.com/drive/folders/abc", "https://mon-studio.fr"])
+    assert r["drives"] == ["https://drive.google.com/drive/folders/abc"]
+    assert r["website_studio"] == "https://mon-studio.fr"
+    assert r["autres"] == []
+
+
+def test_sort_liens_gdoc_reste_pitch_pas_drive():
+    # docs.google.com est capté par PITCH avant DRIVE : ne doit pas finir en drives.
+    r = _sort([_GDOC])
+    assert r["pitch_decks"] == [_GDOC]
+    assert r["drives"] == []
+
+
+def test_sort_liens_instagram():
+    r = _sort(["https://www.instagram.com/reel/DLAZLlbKMtJ/"])
+    assert r["instagrams"] == ["https://www.instagram.com/reel/DLAZLlbKMtJ/"]
+    assert r["website_studio"] is None
+    assert r["autres"] == []
+
+
+def test_sort_liens_instagram_dedup_liste_complete():
+    i1 = "https://www.instagram.com/p/aaa/"
+    i2 = "https://instagram.com/studio"
+    r = _sort([i1, i2])
+    assert r["instagrams"] == [i1, i2]
+    assert r["autres"] == []
+
+
+def test_sort_liens_canva_com_et_link():
+    c1 = "https://www.canva.com/design/abc/view"
+    c2 = "https://canva.link/ozeu5w9o1et7nm2"
+    r = _sort([c1, c2])
+    assert r["canvas"] == [c1, c2]
+    assert r["website_studio"] is None
+    assert r["autres"] == []
+
+
+def test_sort_liens_instagram_canva_n_atterrissent_pas_dans_website_studio():
+    insta = "https://www.instagram.com/reel/x/"
+    canva = "https://canva.link/y"
+    r = _sort([insta, canva, "https://mon-studio.fr"])
+    assert r["instagrams"] == [insta]
+    assert r["canvas"] == [canva]
+    assert r["website_studio"] == "https://mon-studio.fr"
+    assert r["autres"] == []
+
+
+def test_sort_liens_canvas_com_n_est_pas_canva():
+    # Régression : « canvas.com » (host différent) ne doit pas matcher CANVA_RE.
+    r = _sort(["https://canvas.com/cours"])
+    assert r["canvas"] == []
+    assert r["website_studio"] == "https://canvas.com/cours"
+
+
+def test_sort_liens_canva_pas_pris_pour_twitter():
+    # Régression : « canva.com » ne doit pas être happé par une autre catégorie.
+    r = _sort(["https://www.canva.com/design/abc"])
+    assert r["twitters"] == []
+    assert r["canvas"] == ["https://www.canva.com/design/abc"]
+
+
 def test_sort_liens_site_officiel_https_inconnu():
     r = _sort(["https://mon-studio.fr"])
     assert r["website_studio"] == "https://mon-studio.fr"
@@ -540,6 +686,10 @@ def test_sort_liens_toutes_categories_ensemble():
         "https://www.kickstarter.com/projects/x",
         "https://youtu.be/abc",
         "https://x.com/studio",
+        "https://fathom.video/calls/9",
+        "https://drive.google.com/file/d/zzz/view",
+        "https://www.instagram.com/reel/q/",
+        "https://canva.link/abc",
         "https://mon-studio.fr",
         _GDOC,
     ]
@@ -548,6 +698,10 @@ def test_sort_liens_toutes_categories_ensemble():
     assert r["kickstarter"] == "https://www.kickstarter.com/projects/x"
     assert r["youtubes"] == ["https://youtu.be/abc"]
     assert r["twitters"] == ["https://x.com/studio"]
+    assert r["fathoms"] == ["https://fathom.video/calls/9"]
+    assert r["drives"] == ["https://drive.google.com/file/d/zzz/view"]
+    assert r["instagrams"] == ["https://www.instagram.com/reel/q/"]
+    assert r["canvas"] == ["https://canva.link/abc"]
     assert r["website_studio"] == "https://mon-studio.fr"
     assert r["pitch_decks"] == [_GDOC]
     assert r["autres"] == []

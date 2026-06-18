@@ -12,7 +12,9 @@ import urllib.error
 import urllib.request
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN_LEADS", "")
-DB_ID = "37277389-df89-809e-a356-c242c5e43cbb"
+# Id de la base Leads : configurable via NOTION_DB_LEADS_ID (~/.env.notion),
+# avec l'ancienne valeur codée en dur comme repli rétrocompatible.
+DB_ID = os.environ.get("NOTION_DB_LEADS_ID") or "37277389-df89-809e-a356-c242c5e43cbb"
 NOTION_VERSION = "2022-06-28"
 BASE_URL = "https://api.notion.com/v1"
 
@@ -46,6 +48,30 @@ def _request(method: str, path: str, body: dict | None = None) -> dict:
 # Propriétés toujours écrasées lors d'une mise à jour, même si elles ont déjà une valeur.
 ALWAYS_UPDATE = {"Messages", "Dernier message", "Tags"}
 
+# Limite Notion : un objet text de rich_text refuse plus de 2000 caractères.
+# Au-delà, l'API rejette tout le push — on tronque donc systématiquement.
+NOTION_RICH_TEXT_LIMIT = 2000
+
+
+def _truncate_utf16(content: str, limit: int) -> str:
+    """Tronque à `limit` unités UTF-16 — l'unité réellement comptée par Notion.
+
+    Un slice Python (``content[:limit]``) compte les points de code : un emoji
+    hors BMP (ex. 🧱) vaut 1 point de code mais 2 unités UTF-16, si bien qu'une
+    chaîne de 2000 points de code peut atteindre 2002 unités et faire rejeter le
+    push (HTTP 400). On tronque donc sur la longueur UTF-16.
+    """
+    encoded = content.encode("utf-16-le")
+    if len(encoded) <= limit * 2:
+        return content
+    # Couper sur une frontière d'unité ; errors='ignore' jette une demi-paire de substitution.
+    return encoded[: limit * 2].decode("utf-16-le", errors="ignore")
+
+
+def _rich_text(content: str) -> dict:
+    """Construit une propriété rich_text en tronquant à la limite Notion (2000 unités UTF-16)."""
+    return {"rich_text": [{"text": {"content": _truncate_utf16(content, NOTION_RICH_TEXT_LIMIT)}}]}
+
 
 def _is_empty(prop: dict) -> bool:
     """Retourne True si une propriété Notion ne contient aucune valeur."""
@@ -64,13 +90,13 @@ def _build_properties(data: dict) -> dict:
         "Nom du jeu": {"title": [{"text": {"content": data["nom_du_jeu"]}}]},
     }
     if data.get("source"):
-        props["Source"] = {"rich_text": [{"text": {"content": data["source"]}}]}
+        props["Source"] = _rich_text(data["source"])
     if data.get("date"):
         props["Dernier message"] = {"date": {"start": data["date"]}}
     if data.get("messages"):
-        props["Messages"] = {"rich_text": [{"text": {"content": data["messages"]}}]}
+        props["Messages"] = _rich_text(data["messages"])
     if data.get("liens"):
-        props["Liens"] = {"rich_text": [{"text": {"content": data["liens"]}}]}
+        props["Liens"] = _rich_text(data["liens"])
     if data.get("pieces_jointes"):
         props["Pièces jointes"] = {
             "files": [
@@ -79,33 +105,41 @@ def _build_properties(data: dict) -> dict:
             ]
         }
     if data.get("thread_id"):
-        props["Thread ID"] = {"rich_text": [{"text": {"content": str(data["thread_id"])}}]}
+        props["Thread ID"] = _rich_text(str(data["thread_id"]))
     if data.get("steam_url"):
         props["Steam URL"] = {"url": data["steam_url"]}
     if data.get("kickstarter"):
         props["Kickstarter"] = {"url": data["kickstarter"]}
     if data.get("pitch_decks"):
-        props["Pitch Deck"] = {"rich_text": [{"text": {"content": "\n".join(data["pitch_decks"])[:2000]}}]}
+        props["Pitch Deck"] = _rich_text("\n".join(data["pitch_decks"]))
     if data.get("exec_docs"):
-        props["Exec Doc"] = {"rich_text": [{"text": {"content": "\n".join(data["exec_docs"])[:2000]}}]}
+        props["Exec Doc"] = _rich_text("\n".join(data["exec_docs"]))
     if data.get("youtubes"):
-        props["YouTube"] = {"rich_text": [{"text": {"content": "\n".join(data["youtubes"])[:2000]}}]}
+        props["YouTube"] = _rich_text("\n".join(data["youtubes"]))
     if data.get("twitters"):
-        props["Twitter"] = {"rich_text": [{"text": {"content": "\n".join(data["twitters"])[:2000]}}]}
+        props["Twitter"] = _rich_text("\n".join(data["twitters"]))
+    if data.get("fathoms"):
+        props["Enregistrement fathom"] = _rich_text("\n".join(data["fathoms"]))
+    if data.get("drives"):
+        props["Drive / Assets"] = _rich_text("\n".join(data["drives"]))
+    if data.get("instagrams"):
+        props["Instagram"] = _rich_text("\n".join(data["instagrams"]))
+    if data.get("canvas"):
+        props["Canva"] = _rich_text("\n".join(data["canvas"]))
     if data.get("autres_steam_urls"):
-        props["Autres Steam URLs"] = {"rich_text": [{"text": {"content": data["autres_steam_urls"]}}]}
+        props["Autres Steam URLs"] = _rich_text(data["autres_steam_urls"])
     if data.get("studio"):
-        props["Studio"] = {"rich_text": [{"text": {"content": data["studio"]}}]}
+        props["Studio"] = _rich_text(data["studio"])
     if data.get("website_studio"):
         props["Website studio"] = {"url": data["website_studio"]}
     if data.get("description_jeu"):
-        props["Description jeux"] = {"rich_text": [{"text": {"content": data["description_jeu"]}}]}
+        props["Description jeux"] = _rich_text(data["description_jeu"])
     if data.get("email"):
         props["Email"] = {"email": data["email"]}
     if data.get("tags"):
         props["Tags"] = {"multi_select": [{"name": t} for t in data["tags"]]}
     if data.get("summary"):
-        props["Summary"] = {"rich_text": [{"text": {"content": data["summary"][:2000]}}]}
+        props["Summary"] = _rich_text(data["summary"])
     if data.get("dernier_resume"):
         props["Dernier résumé"] = {"date": {"start": data["dernier_resume"]}}
     return props
@@ -168,23 +202,29 @@ def push_to_notion(data: dict) -> dict:
         return {"action": "created", "id": page["id"]}
 
 
+# Colonnes que le code remplit en rich_text (texte, parfois plusieurs liens
+# joints par « \n »). Si la base les expose avec un autre type — typiquement url —
+# Notion rejette tout le push (HTTP 400) : on force donc le type rich_text.
+RICH_TEXT_COLUMNS = ("Summary", "Pitch Deck", "Exec Doc", "YouTube", "Twitter", "Enregistrement fathom", "Drive / Assets", "Instagram", "Canva")
+
+
 def ensure_schema() -> None:
-    """Crée Summary et Dernier résumé dans la base Leads si elles sont absentes."""
+    """Aligne le schéma de la base Leads sur ce que le code écrit.
+
+    - crée « Dernier résumé » (date) si absente ;
+    - crée les colonnes rich_text manquantes, et corrige le type de celles qui
+      existeraient avec un type différent (ex. url) — sans quoi Notion rejette le
+      push entier (HTTP 400) dès qu'un lien YouTube/Twitter/Exec/Pitch est présent.
+    """
     db = _request("GET", f"/databases/{DB_ID}")
     existing = db.get("properties", {})
     patch = {}
-    if "Summary" not in existing:
-        patch["Summary"] = {"rich_text": {}}
     if "Dernier résumé" not in existing:
         patch["Dernier résumé"] = {"date": {}}
-    if "Pitch Deck" not in existing:
-        patch["Pitch Deck"] = {"rich_text": {}}
-    if "Exec Doc" not in existing:
-        patch["Exec Doc"] = {"rich_text": {}}
-    if "YouTube" not in existing:
-        patch["YouTube"] = {"rich_text": {}}
-    if "Twitter" not in existing:
-        patch["Twitter"] = {"rich_text": {}}
+    for col in RICH_TEXT_COLUMNS:
+        spec = existing.get(col)
+        if spec is None or spec.get("type") != "rich_text":
+            patch[col] = {"rich_text": {}}
     if patch:
         _request("PATCH", f"/databases/{DB_ID}", {"properties": patch})
 
@@ -206,7 +246,7 @@ def get_page_summary_info(page_id: str) -> dict:
 def update_summary(page_id: str, summary: str, date_str: str) -> None:
     """Met à jour Summary et Dernier résumé sur une page lead."""
     _request("PATCH", f"/pages/{page_id}", {"properties": {
-        "Summary": {"rich_text": [{"text": {"content": summary[:2000]}}]},
+        "Summary": _rich_text(summary),
         "Dernier résumé": {"date": {"start": date_str}},
     }})
 
@@ -218,7 +258,7 @@ def trigger_ai_summary(page_id: str, messages_text: str, date_str: str) -> None:
     Stamp Dernier résumé dans le même appel pour tracker la dernière régénération.
     """
     _request("PATCH", f"/pages/{page_id}", {"properties": {
-        "Messages": {"rich_text": [{"text": {"content": messages_text[:2000]}}]},
+        "Messages": _rich_text(messages_text),
         "Dernier résumé": {"date": {"start": date_str}},
     }})
 
