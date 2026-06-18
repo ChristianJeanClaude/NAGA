@@ -86,7 +86,7 @@ async def on_message(message: discord.Message) -> None:
         return
 
     # Only add reactions if game is not already scouted
-    for emoji in ["👍", "👎", "🔥", "❤️"]:
+    for emoji in ["👍", "👎"]:
         await message.add_reaction(emoji)
 
 
@@ -251,7 +251,7 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             discord_message_url=discord_message_url,
         )
         game.relevance_score = compute_relevance_score(game)
-        notion_url = await create_game_page(game)
+        await create_game_page(game)
         # Enrichissement best-effort : ne lève jamais (erreurs loguées en interne).
         page_id = await get_page_id(game.app_id)
         if page_id:
@@ -266,65 +266,8 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         return
 
     # Succès : marquer comme traité (journalisation assurée par create_game_page).
+    # Le bot reste silencieux après un scouting réussi : aucun embed posté.
     await mark_processed(payload.message_id, payload.channel_id, app_id)
-
-    # Couleur dynamique selon le relevance score (neutre si 0/None).
-    score = game.relevance_score
-    if not score:
-        color = 0x1B2838  # Steam dark blue (neutre)
-    elif score >= 70:
-        color = 0x57F287  # vert
-    elif score >= 50:
-        color = 0xFEE75C  # jaune
-    else:
-        color = 0xED4245  # rouge
-
-    embed = discord.Embed(
-        title=game.name,
-        url=game.steam_url,
-        description=game.short_description[:200] + "..."
-        if len(game.short_description) > 200
-        else game.short_description,
-        color=color,
-    )
-    embed.add_field(name="Developer", value=game.developer or "N/A", inline=True)
-    embed.add_field(
-        name="Genres",
-        value=", ".join(game.genres) if game.genres else "N/A",
-        inline=True,
-    )
-    # Champs post-lancement : masqués s'ils sont vides (jeu pas encore sorti).
-    if game.review_score:
-        embed.add_field(name="Review Score", value=game.review_score, inline=True)
-    if game.owners_estimate:
-        embed.add_field(name="Owners", value=game.owners_estimate, inline=True)
-    if game.peak_ccu:
-        embed.add_field(name="Peak CCU", value=str(game.peak_ccu), inline=True)
-    embed.add_field(
-        name="Release Date",
-        value=game.release_date or "Coming soon",
-        inline=True,
-    )
-    if game.relevance_score:
-        embed.add_field(
-            name="Relevance Score", value=str(game.relevance_score), inline=True
-        )
-    embed.add_field(name="Scouted By", value=game.scouted_by or "N/A", inline=True)
-    embed.set_image(
-        url=f"https://cdn.akamai.steamstatic.com/steam/apps/{game.app_id}/header.jpg"
-    )
-    embed.set_footer(text="NAGA Scout Bot • Scouted ✅")
-
-    view = discord.ui.View()
-    view.add_item(
-        discord.ui.Button(
-            label="Voir sur Notion",
-            url=notion_url,
-            style=discord.ButtonStyle.link,
-        )
-    )
-
-    await _send_to_scout_log(embed, view)
 
 
 @bot.command(name="rescan")
@@ -461,7 +404,7 @@ async def suggest(ctx):
                 )
             )
             suggestion_msg = await suggest_channel.send(embed=embed, view=view)
-            for emoji in ["👍", "👎", "🔥", "❤️"]:
+            for emoji in ["👍", "👎"]:
                 await suggestion_msg.add_reaction(emoji)
 
         # Pas de confirmation redondante si on est déjà dans le bon salon.
