@@ -6,13 +6,10 @@ NAGA Scout Bot is a Discord bot that helps a games-publishing team scout
 prospective titles on Steam. When team members react to a Steam link posted in
 a dedicated channel, the bot fetches the game's data from Steam, SteamSpy, and
 the Steam store page, computes a relevance score, and creates a structured
-entry in a Notion database. It also provides on-demand commands to refresh an
-existing entry (`!rescan`) and to surface upcoming indie games worth scouting
-(`!suggest`).
+entry in a Notion database.
 
-The bot is designed to operate silently: it logs to stdout and only posts to
-Discord when there is something meaningful to show (a scouted game, a
-duplicate notice, or a command result).
+The bot is designed to operate silently: it logs to stdout and does not post
+confirmation messages to Discord.
 
 ## Features
 
@@ -22,10 +19,6 @@ duplicate notice, or a command result).
   same game is never scouted twice.
 - **Automatic Notion entry creation** — aggregates metadata from Steam,
   SteamSpy, and the store page into a new Notion page.
-- **`!rescan` command** — re-fetches fresh metrics for an existing game and
-  updates its Notion page.
-- **`!suggest` command** — analyzes the Notion database to build a genre/tag
-  profile, then suggests upcoming indie games not yet scouted.
 - **Relevance score** — a 0–100 score derived from review sentiment, owner
   estimates, peak concurrent players, and review volume.
 
@@ -43,16 +36,16 @@ naga-scout-bot/
 ├── .env.example                # Template for required environment variables
 ├── bot/
 │   ├── __init__.py
-│   └── events.py               # Discord events (on_message, on_raw_reaction_add) and commands (!rescan, !suggest)
+│   └── events.py               # Discord events (on_message, on_raw_reaction_add)
 ├── services/
 │   ├── __init__.py
 │   ├── steam.py                # Steam appdetails API, store-page scraping, SteamSpy, App ID extraction
 │   ├── notion.py               # Notion reads/writes: find/create pages, get page ID, list all App IDs
-│   ├── notion_update.py        # Updates an existing Notion page (used by !rescan)
+│   ├── notion_update.py        # Updates an existing Notion page
 │   ├── cache.py                # Local SQLite cache for message deduplication
 │   ├── retry.py                # Centralized async retry with exponential backoff
 │   ├── scoring.py              # Relevance-score computation
-│   └── suggest.py              # NAGA profile + Steam suggestion search (used by !suggest)
+│   └── suggest.py              # NAGA profile + Steam suggestion search
 ├── models/
 │   ├── __init__.py
 │   └── game.py                 # GameData dataclass + Notion property serialization
@@ -115,12 +108,12 @@ naga-scout-bot/
 |---|---|---|
 | `DISCORD_TOKEN` | Bot authentication token. | [Discord Developer Portal](https://discord.com/developers/applications) → your application → **Bot** → **Reset Token**. |
 | `DISCORD_CHANNEL_ID` | ID of the channel where Steam links are posted and scouted. | Enable **Developer Mode** in Discord (Settings → Advanced), then right-click the channel → **Copy Channel ID**. |
-| `DISCORD_SUGGEST_CHANNEL_ID` | ID of the channel where `!suggest` results are posted. | Right-click the suggestions channel → **Copy Channel ID**. |
+| `DISCORD_SUGGEST_CHANNEL_ID` | ID of the channel reserved for game suggestions. | Right-click the suggestions channel → **Copy Channel ID**. |
 | `NOTION_TOKEN` | Internal integration secret used to read/write the database. | [Notion Integrations](https://www.notion.so/my-integrations) → **New integration** → copy the **Internal Integration Secret**. Share the database with the integration. |
 | `NOTION_DATABASE_ID` | ID of the target Notion database. | Open the database as a full page; the 32-character ID is in the URL: `notion.so/<workspace>/<DATABASE_ID>?v=...`. |
 | `STEAM_API_KEY` | Steam Web API key. | [Steam Web API Key registration](https://steamcommunity.com/dev/apikey). |
 
-> **Note:** All seven variables are required at startup — the bot fails fast
+> **Note:** All six variables are required at startup — the bot fails fast
 > with a clear error if any is missing. `STEAM_API_KEY` is validated on startup
 > and reserved for future use; the current data sources (appdetails, store
 > search, SteamSpy) do not require it.
@@ -150,9 +143,8 @@ match exactly, or the Notion API will reject writes.
 | Relevance Score | Number |
 | Status | Select |
 
-> `Status` is set automatically to `Scouted` on creation and is never
-> overwritten by `!rescan`. The bot writes the 16 data columns above plus
-> `Status` (17 total).
+> `Status` is set automatically to `Scouted` on creation. The bot writes the
+> 16 data columns above plus `Status` (17 total).
 
 ### Discord Bot Setup
 
@@ -168,8 +160,7 @@ The bot requests the default intents plus **message content**, **reactions**,
 and **members**.
 
 When inviting the bot (OAuth2 → URL Generator), grant it the `bot` scope and at
-least the following permissions in both the scouting and the log/suggestion
-channels:
+least the following permissions in the scouting channel:
 
 - View Channels
 - Send Messages
@@ -189,33 +180,6 @@ channels:
    game's data from Steam, the store page, and SteamSpy, computes the relevance
    score, and creates a Notion entry. The bot stays silent — no confirmation
    message is posted; progress is logged to the console only.
-
-### Commands
-
-#### `!rescan <steam_url>`
-
-Re-fetches fresh metrics from Steam and updates the existing Notion page for
-that game. Identity fields (Game, Steam App ID, Steam URL, Scouted By) and
-Status are preserved; only metrics and descriptive fields are updated.
-
-```
-!rescan https://store.steampowered.com/app/1245620/ELDEN_RING/
-```
-
-#### `!suggest`
-
-Analyzes the Notion database to determine the most common genres and tags
-(the "NAGA profile"), searches Steam for upcoming indie games that are not yet
-scouted, and posts up to five suggestions in the suggestions channel.
-
-```
-!suggest
-```
-
-- **Cooldown:** once per 5 minutes per server. If invoked during the cooldown,
-  the bot replies with the remaining time.
-- Results are randomized across a larger candidate pool, so repeated calls
-  surface different games.
 
 ## Bot Flow Diagram
 
@@ -290,7 +254,7 @@ Tests are offline by design: there are no network calls. Async tests run under
 - **Retry with exponential backoff** — external calls go through
   `services/retry.py` (`with_retry`), which retries on transient errors with
   delays of 2s, 4s, 8s.
-- **Silent operation** — the bot logs to stdout and only sends Discord messages
-  when there is something meaningful to convey (a command result). Failures in
-  non-critical paths are logged and swallowed so they never break the pipeline.
+- **Silent operation** — the bot logs to stdout and does not post confirmation
+  messages to Discord; it only adds voting reactions. Failures in non-critical
+  paths are logged and swallowed so they never break the pipeline.
 ```

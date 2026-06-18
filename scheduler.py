@@ -2,7 +2,6 @@
 
 Planifie et exécute les jobs récurrents en parallèle avec le bot Discord :
   - TrackingJob  — tous les jours à 08h00 UTC
-  - ScoutingJob  — tous les 2 jours à 10h00 UTC
 
 Les jobs tournent dans la même boucle asyncio que le bot Discord.
 Toute erreur d'un job est attrapée et loggée — un crash ne stoppe
@@ -17,20 +16,7 @@ logger = logging.getLogger(__name__)
 
 # Horaires de déclenchement (UTC) et cadence des jobs.
 _TRACKING_TIME = dt_time(hour=8, minute=0)
-_SCOUTING_TIME = dt_time(hour=10, minute=0)
-_SCOUTING_INTERVAL_DAYS = 2
 OUTREACH_POLL_INTERVAL_MINUTES = 60
-
-
-async def _should_run_today(last_run: datetime | None, interval_days: int) -> bool:
-    """
-    Retourne True si le job doit tourner aujourd'hui.
-    - Si jamais tourné (last_run=None) → True
-    - Si dernier run il y a >= interval_days → True
-    """
-    if last_run is None:
-        return True
-    return datetime.now(timezone.utc) - last_run >= timedelta(days=interval_days)
 
 
 async def _wait_until(target_time: dt_time) -> None:
@@ -67,28 +53,6 @@ async def run_tracking_job() -> None:
             pass
 
 
-async def run_scouting_job() -> None:
-    """
-    Lance le ScoutingJob.
-    Import lazy pour éviter les imports circulaires.
-    Loggue début, fin et erreurs.
-    Ne raise jamais.
-    """
-    from scouting.job import ScoutingJob
-    logger.info("ScoutingJob — démarrage")
-    try:
-        job = ScoutingJob()
-        await job.run()
-        logger.info("ScoutingJob — terminé")
-    except Exception as exc:
-        logger.error(f"ScoutingJob — ÉCHEC : {exc}", exc_info=True)
-    finally:
-        try:
-            job.close()
-        except Exception:
-            pass
-
-
 async def tracking_loop() -> None:
     """
     Boucle du TrackingJob :
@@ -99,21 +63,6 @@ async def tracking_loop() -> None:
     while True:
         await _wait_until(_TRACKING_TIME)
         await run_tracking_job()
-
-
-async def scouting_loop() -> None:
-    """
-    Boucle du ScoutingJob :
-    - Attend 10h00 UTC
-    - Lance run_scouting_job()
-    - Répète tous les 2 jours
-    """
-    last_run: datetime | None = None
-    while True:
-        await _wait_until(_SCOUTING_TIME)
-        if await _should_run_today(last_run, _SCOUTING_INTERVAL_DAYS):
-            await run_scouting_job()
-            last_run = datetime.now(timezone.utc)
 
 
 async def outreach_poll_loop() -> None:
@@ -137,12 +86,10 @@ async def start_scheduler() -> None:
         asyncio.create_task(start_scheduler())
     """
     logger.info(
-        "Scheduler démarré — TrackingJob @08:00 UTC, ScoutingJob @10:00 UTC (J+2), "
-        "OutreachPoll toutes les 60 min"
+        "Scheduler démarré — TrackingJob @08:00 UTC, OutreachPoll toutes les 60 min"
     )
     await asyncio.gather(
         tracking_loop(),
-        scouting_loop(),
         outreach_poll_loop(),
         return_exceptions=True,
     )
