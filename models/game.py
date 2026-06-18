@@ -133,7 +133,7 @@ class GameData:
         # --- Steam API ---
         add_text("Short Description", self.short_description)
         add_text("Developer", self.developer)
-        add_multi_select("Genre", self.genres)
+        add_text("Genre", ", ".join(self.genres) if self.genres else "")
         add_url("website", self.website)
 
         # --- Scraping (store page) ---
@@ -145,8 +145,6 @@ class GameData:
         add_url("Discord", self.discord_url)
 
         # --- SteamSpy ---
-        add_text("Owners Estimate", self.owners_estimate)
-        add_number("Peak CCU", self.peak_ccu)
         # Followers : on privilégie le compteur scrapé de la page boutique
         # (plus à jour), avec repli sur l'estimation SteamSpy si absent.
         add_number(
@@ -155,7 +153,6 @@ class GameData:
         )
 
         # --- Discord context ---
-        add_text("Scouted By", self.scouted_by)
         add_date("Scouted At", self.scouted_at)
         add_url("Discord Message URL", self.discord_message_url)
 
