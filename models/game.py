@@ -109,10 +109,6 @@ class GameData:
             if value is not None:
                 props[name] = {"number": value}
 
-        def add_select(name: str, value: str | None) -> None:
-            if value:
-                props[name] = {"select": {"name": value}}
-
         def add_multi_select(name: str, value: list[str]) -> None:
             if value:
                 props[name] = {"multi_select": [{"name": v} for v in value]}
@@ -139,8 +135,6 @@ class GameData:
         # --- Scraping (store page) ---
         # Notion limite la colonne Tags : on n'envoie que les 4 premiers.
         add_multi_select("Tags", self.tags[:4])
-        add_select("Review Score", self.review_score)
-        add_number("Review Count", self.review_count)
         add_url("twitter", self.twitter_url)
         add_url("Discord", self.discord_url)
 
@@ -161,9 +155,5 @@ class GameData:
         add_url("Momentum Post", self.momentum_post)
         add_text("Momentum Stat", self.momentum_stat)
         add_text("Canaux de signal", self.signal)
-
-        # --- Computed ---
-        if self.relevance_score:
-            add_number("Relevance Score", self.relevance_score)
 
         return props
