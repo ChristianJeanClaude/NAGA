@@ -766,7 +766,8 @@ class NagaScraperBot(discord.Client):
         if not name_changed and not tags_changed:
             return
 
-        if name_changed:
+        # Renommage côté base archive (si activée).
+        if name_changed and self._notion is not None:
             page_id = await self._notion.find_game_page(str(after.id))
             if page_id is not None:
                 try:
@@ -775,13 +776,16 @@ class NagaScraperBot(discord.Client):
                 except NotionError as exc:
                     log(f"Erreur renommage thread {after.id} : {exc}")
 
-        if tags_changed and self._push_lead is not None:
-            new_tags = [t.name for t in getattr(after, "applied_tags", [])]
+        # Répercute le renommage et/ou les tags sur la base Leads.
+        if self._push_lead is not None:
             acc = self._thread_leads.get(after.id)
             if acc is not None:
-                acc["tags"] = new_tags
+                if name_changed:
+                    acc["title"] = after.name
+                if tags_changed:
+                    acc["tags"] = [t.name for t in getattr(after, "applied_tags", [])]
                 self._push_thread_lead(after.id)
-                log(f"Tags mis à jour pour « {after.name} » : {new_tags}.")
+                log(f"Lead mis à jour pour « {after.name} ».")
 
     async def process_message(self, message):
         """Enregistre TOUS les messages dans Notion.
@@ -811,6 +815,11 @@ class NagaScraperBot(discord.Client):
                 self._accumulate_lead(channel.id, title, record, tags=thread_tags)
             else:
                 title = DIVERS_NAME
+
+            # Base archive optionnelle : si elle est désactivée (self._notion None),
+            # on s'arrête après l'agrégation Leads ci-dessus.
+            if self._notion is None:
+                return
 
             page_id = await self._notion.find_game_page(thread_id)
             if page_id is None:
@@ -911,12 +920,25 @@ async def main():
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
     discord_env = load_env_file(ENV_DISCORD, ["DISCORD_TOKEN", "DISCORD_CHANNEL_ID"])
-    notion_env = load_env_file(ENV_NOTION, ["NOTION_TOKEN", "NOTION_PARENT_PAGE_ID"])
 
-    notion = NotionClient(notion_env["NOTION_TOKEN"], notion_env["NOTION_PARENT_PAGE_ID"])
-    await notion.find_or_create_database()
-    await notion.ensure_message_ids_property()
-    await notion.ensure_thread_id_property()
+    # Base archive (« NAGA — Jeux Discord ») optionnelle : ARCHIVE_ENABLED=false la
+    # désactive. Désactivée, NOTION_PARENT_PAGE_ID n'est plus requis et le bot ne
+    # pousse que vers la base Leads (scrape bien plus rapide, moins d'appels Notion).
+    archive_enabled = os.environ.get("ARCHIVE_ENABLED", "true").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+    required = ["NOTION_TOKEN", "NOTION_PARENT_PAGE_ID"] if archive_enabled else ["NOTION_TOKEN"]
+    notion_env = load_env_file(ENV_NOTION, required)
+
+    notion = None
+    if archive_enabled:
+        notion = NotionClient(notion_env["NOTION_TOKEN"], notion_env["NOTION_PARENT_PAGE_ID"])
+        await notion.find_or_create_database()
+        await notion.ensure_message_ids_property()
+        await notion.ensure_thread_id_property()
+        log("Archive activée : base « NAGA — Jeux Discord ».")
+    else:
+        log("Archive désactivée (ARCHIVE_ENABLED=false) : push uniquement vers la base Leads.")
 
     # Seconde base Notion (Leads de Djoundounda). Le module lit son token dans
     # NOTION_TOKEN_LEADS à l'import : on renseigne d'abord l'environnement.

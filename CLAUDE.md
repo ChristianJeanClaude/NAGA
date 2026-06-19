@@ -44,6 +44,8 @@ Si `NOTION_TOKEN_LEADS` est absent, le bot retombe sur `NOTION_TOKEN` pour la ba
 
 `NOTION_DB_LEADS_ID` permet de pointer la base Leads sans toucher au code ; à défaut, l'id par défaut codé en dur dans `bots/notion_leads.py` est utilisé.
 
+Variable d'environnement optionnelle `ARCHIVE_ENABLED` (défaut : `true`) : à `false`, la base archive « NAGA — Jeux Discord » est désactivée — `NOTION_PARENT_PAGE_ID` n'est plus requis et le bot ne pousse que vers la base Leads (scrape bien plus rapide). `notion_leads.ensure_schema()` détecte automatiquement la propriété titre de la base cible (ex. `Jeu`) et crée ses colonnes gérées sans toucher aux champs humains.
+
 ## Commandes de lancement
 
 ```bash

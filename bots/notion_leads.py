@@ -45,8 +45,50 @@ def _request(method: str, path: str, body: dict | None = None) -> dict:
         raise
 
 
+# Propriété titre de la base cible. « Nom du jeu » par défaut (ancienne base de
+# test) ; détectée dynamiquement par ensure_schema() pour s'adapter à n'importe
+# quelle base — ex. « Jeu » dans le CRM « Pipeline Prospects Jeux ».
+_TITLE_PROP = "Nom du jeu"
+
 # Propriétés toujours écrasées lors d'une mise à jour, même si elles ont déjà une valeur.
-ALWAYS_UPDATE = {"Messages", "Dernier message", "Tags"}
+# (Champs gérés par le bot ; les champs humains du CRM ne sont jamais dans cette liste.)
+ALWAYS_UPDATE = {"Messages", "Dernier échange", "Tags"}
+
+# Colonnes gérées par le bot, avec leur type Notion. ensure_schema() les crée si
+# absentes (et corrige en rich_text celles qui existeraient avec un autre type).
+# Le titre n'y figure pas (une base a un unique titre, détecté à l'exécution).
+# Les champs humains du CRM (Statut, Priorité, Tier, Type de deal, Owner NAGA,
+# Revshare cherché, WL estimées, Deadline, Next step, Notes, Insights) sont
+# volontairement absents : le bot ne les crée ni ne les modifie.
+MANAGED_COLUMNS = {
+    "Thread ID": {"rich_text": {}},          # clé d'idempotence (technique)
+    "Source": {"rich_text": {}},
+    "Dernier échange": {"date": {}},         # natif CRM : date du dernier message Discord
+    "Messages": {"rich_text": {}},
+    "Liens": {"rich_text": {}},
+    "Pièces jointes": {"files": {}},
+    "Lien Steam": {"url": {}},               # natif CRM
+    "Kickstarter": {"url": {}},
+    "Pitch Deck": {"rich_text": {}},
+    "Exec Doc": {"rich_text": {}},
+    "YouTube": {"rich_text": {}},
+    "Twitter": {"rich_text": {}},
+    "Enregistrement fathom": {"rich_text": {}},
+    "Drive / Assets": {"rich_text": {}},
+    "Instagram": {"rich_text": {}},
+    "Canva": {"rich_text": {}},
+    "Autres Steam URLs": {"rich_text": {}},
+    "Studio": {"rich_text": {}},             # natif CRM
+    "Website studio": {"url": {}},
+    "Description jeux": {"rich_text": {}},
+    "Email": {"email": {}},
+    "Tags": {"multi_select": {}},
+    "Summary": {"rich_text": {}},
+    "Dernier résumé": {"date": {}},
+}
+
+# Sous-ensemble rich_text (utilisé pour la correction de type et les tests).
+RICH_TEXT_COLUMNS = tuple(name for name, spec in MANAGED_COLUMNS.items() if "rich_text" in spec)
 
 # Limite Notion : un objet text de rich_text refuse plus de 2000 caractères.
 # Au-delà, l'API rejette tout le push — on tronque donc systématiquement.
@@ -85,14 +127,15 @@ def _is_empty(prop: dict) -> bool:
     return False
 
 
-def _build_properties(data: dict) -> dict:
+def _build_properties(data: dict, title_prop: str = None) -> dict:
+    title_prop = title_prop or _TITLE_PROP
     props: dict = {
-        "Nom du jeu": {"title": [{"text": {"content": data["nom_du_jeu"]}}]},
+        title_prop: {"title": [{"text": {"content": data["nom_du_jeu"]}}]},
     }
     if data.get("source"):
         props["Source"] = _rich_text(data["source"])
     if data.get("date"):
-        props["Dernier message"] = {"date": {"start": data["date"]}}
+        props["Dernier échange"] = {"date": {"start": data["date"]}}
     if data.get("messages"):
         props["Messages"] = _rich_text(data["messages"])
     if data.get("liens"):
@@ -107,7 +150,7 @@ def _build_properties(data: dict) -> dict:
     if data.get("thread_id"):
         props["Thread ID"] = _rich_text(str(data["thread_id"]))
     if data.get("steam_url"):
-        props["Steam URL"] = {"url": data["steam_url"]}
+        props["Lien Steam"] = {"url": data["steam_url"]}
     if data.get("kickstarter"):
         props["Kickstarter"] = {"url": data["kickstarter"]}
     if data.get("pitch_decks"):
@@ -176,12 +219,12 @@ def push_to_notion(data: dict) -> dict:
     else:
         result = _request("POST", f"/databases/{DB_ID}/query", {
             "filter": {
-                "property": "Nom du jeu",
+                "property": _TITLE_PROP,
                 "title": {"equals": data["nom_du_jeu"]},
             }
         })
 
-    properties = _build_properties(data)
+    properties = _build_properties(data, _TITLE_PROP)
 
     if result["results"]:
         page_id = result["results"][0]["id"]
@@ -202,29 +245,33 @@ def push_to_notion(data: dict) -> dict:
         return {"action": "created", "id": page["id"]}
 
 
-# Colonnes que le code remplit en rich_text (texte, parfois plusieurs liens
-# joints par « \n »). Si la base les expose avec un autre type — typiquement url —
-# Notion rejette tout le push (HTTP 400) : on force donc le type rich_text.
-RICH_TEXT_COLUMNS = ("Summary", "Pitch Deck", "Exec Doc", "YouTube", "Twitter", "Enregistrement fathom", "Drive / Assets", "Instagram", "Canva")
-
-
 def ensure_schema() -> None:
-    """Aligne le schéma de la base Leads sur ce que le code écrit.
+    """Aligne le schéma de la base cible sur ce que le bot écrit, sans toucher
+    aux champs humains du CRM.
 
-    - crée « Dernier résumé » (date) si absente ;
-    - crée les colonnes rich_text manquantes, et corrige le type de celles qui
-      existeraient avec un type différent (ex. url) — sans quoi Notion rejette le
-      push entier (HTTP 400) dès qu'un lien YouTube/Twitter/Exec/Pitch est présent.
+    - détecte la propriété titre de la base (ex. « Jeu ») et la mémorise ;
+    - crée les colonnes gérées manquantes (MANAGED_COLUMNS) ;
+    - corrige en rich_text celles qui existeraient avec un autre type (ex. url),
+      sinon Notion rejette le push entier (HTTP 400) dès qu'un lien catégorisé
+      est présent.
     """
+    global _TITLE_PROP
     db = _request("GET", f"/databases/{DB_ID}")
     existing = db.get("properties", {})
+
+    for name, spec in existing.items():
+        if spec.get("type") == "title":
+            _TITLE_PROP = name
+            break
+
     patch = {}
-    if "Dernier résumé" not in existing:
-        patch["Dernier résumé"] = {"date": {}}
-    for col in RICH_TEXT_COLUMNS:
-        spec = existing.get(col)
-        if spec is None or spec.get("type") != "rich_text":
-            patch[col] = {"rich_text": {}}
+    for name, spec in MANAGED_COLUMNS.items():
+        current = existing.get(name)
+        is_rich_text = "rich_text" in spec
+        if current is None:
+            patch[name] = spec
+        elif is_rich_text and current.get("type") != "rich_text":
+            patch[name] = spec  # corrige un type divergent (ex. url -> rich_text)
     if patch:
         _request("PATCH", f"/databases/{DB_ID}", {"properties": patch})
 
@@ -276,5 +323,6 @@ if __name__ == "__main__":
         ],
         "statut": "Nouveau",
     }
+    ensure_schema()  # détecte la propriété titre et crée les colonnes gérées
     result = push_to_notion(TEST_DATA)
     print(f"[{result['action'].upper()}] {result['id']}")

@@ -166,3 +166,44 @@ def test_build_properties_omet_les_champs_absents():
     assert "Messages" not in props
     assert "Liens" not in props
     assert props["Nom du jeu"]["title"][0]["text"]["content"] == "X"
+
+
+# --- adaptation au CRM « Pipeline Prospects Jeux » ---------------------------
+
+def test_build_properties_titre_par_defaut_nom_du_jeu():
+    props = notion_leads._build_properties({"nom_du_jeu": "X"})
+    assert props["Nom du jeu"]["title"][0]["text"]["content"] == "X"
+
+
+def test_build_properties_titre_configurable():
+    # Le bot doit pouvoir écrire dans une base dont le titre est « Jeu » (CRM).
+    props = notion_leads._build_properties({"nom_du_jeu": "Chess Nuke"}, title_prop="Jeu")
+    assert props["Jeu"]["title"][0]["text"]["content"] == "Chess Nuke"
+    assert "Nom du jeu" not in props
+
+
+def test_build_properties_steam_mappe_vers_lien_steam():
+    props = notion_leads._build_properties({"nom_du_jeu": "X", "steam_url": "https://store.steampowered.com/app/1/"})
+    assert props["Lien Steam"]["url"] == "https://store.steampowered.com/app/1/"
+    assert "Steam URL" not in props
+
+
+def test_build_properties_date_mappe_vers_dernier_echange():
+    props = notion_leads._build_properties({"nom_du_jeu": "X", "date": "2026-06-18"})
+    assert props["Dernier échange"]["date"]["start"] == "2026-06-18"
+    assert "Dernier message" not in props
+
+
+def test_managed_columns_contient_les_cles_du_crm():
+    # Colonnes techniques/scrapées que le bot doit gérer, sans les champs humains.
+    for col in ("Thread ID", "Lien Steam", "Dernier échange", "Messages",
+                "YouTube", "Enregistrement fathom", "Drive / Assets", "Instagram", "Canva"):
+        assert col in notion_leads.MANAGED_COLUMNS
+    # Le titre n'est pas une colonne gérée (créée/typée), et les champs humains non plus.
+    for humain in ("Statut", "Priorité", "Type de deal", "Owner NAGA", "Next step", "Notes", "Insights"):
+        assert humain not in notion_leads.MANAGED_COLUMNS
+
+
+def test_dernier_echange_dans_always_update():
+    # La date du dernier message doit être rafraîchie à chaque push.
+    assert "Dernier échange" in notion_leads.ALWAYS_UPDATE
