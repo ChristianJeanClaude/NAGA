@@ -843,13 +843,18 @@ class NagaScraperBot(discord.Client):
     def _accumulate_lead(self, thread_id, title, record, tags=None):
         """Ajoute un message à la conversation agrégée du thread (base Leads)."""
         acc = self._thread_leads.setdefault(
-            thread_id, {"title": title, "messages": [], "raw_texts": [], "liens": [], "pieces": [], "tags": [], "game": None}
+            thread_id, {"title": title, "messages": [], "raw_texts": [], "liens": [], "pieces": [], "tags": [], "game": None, "seen": set()}
         )
         acc["title"] = title
         if tags is not None:
             acc["tags"] = tags
         if acc["game"] is None and record.get("game"):
             acc["game"] = record["game"]
+        # Un même message peut arriver deux fois (ex. ouverture d'un thread :
+        # on_thread_create + on_message) : on ne l'agrège qu'une seule fois.
+        if record["message_id"] in acc["seen"]:
+            return
+        acc["seen"].add(record["message_id"])
         acc["messages"].append(
             clean_message_text(record["text"], record["author"]["display_name"], record["timestamp"])
         )
@@ -867,6 +872,15 @@ class NagaScraperBot(discord.Client):
         acc = self._thread_leads.get(thread_id)
         if not acc:
             return
+        # Anti double-push : si rien n'a changé depuis le dernier push de ce
+        # thread (ex. on_thread_create suivi de on_message à l'ouverture), on
+        # n'appelle pas Notion une seconde fois pour un contenu identique.
+        signature = (
+            acc["title"], tuple(acc.get("tags") or ()),
+            len(acc["messages"]), len(acc["liens"]), len(acc["pieces"]), acc.get("date"),
+        )
+        if acc.get("_pushed_sig") == signature:
+            return
         data = build_lead_payload(
             acc["title"], acc["messages"], acc["liens"], acc["pieces"], acc.get("date"),
             thread_id=thread_id,
@@ -877,6 +891,7 @@ class NagaScraperBot(discord.Client):
         try:
             result = self._push_lead(data)
             self._lead_page_ids[thread_id] = result["id"]
+            acc["_pushed_sig"] = signature
             log(f"Lead poussé : « {acc['title']} ».")
         except Exception as exc:  # noqa: BLE001 — isole tout échec du module tiers
             log(f"Échec push Leads pour « {acc['title']} » : {exc}")

@@ -705,3 +705,49 @@ def test_sort_liens_toutes_categories_ensemble():
     assert r["website_studio"] == "https://mon-studio.fr"
     assert r["pitch_decks"] == [_GDOC]
     assert r["autres"] == []
+
+
+# --- déduplication accumulation / push (NagaScraperBot) -----------------------
+
+def _bare_bot(push_lead=None):
+    """Instance de NagaScraperBot sans __init__ (pas de connexion Discord)."""
+    bot = discord_bot.NagaScraperBot.__new__(discord_bot.NagaScraperBot)
+    bot._thread_leads = {}
+    bot._lead_page_ids = {}
+    bot._push_lead = push_lead
+    return bot
+
+
+def _msg(message_id, text="hello"):
+    return {
+        "message_id": message_id, "text": text,
+        "author": {"display_name": "A"}, "timestamp": "2026-06-19T18:46:49.453000+00:00",
+        "embed_text": "", "links": [], "steam_links": [], "attachments": [], "game": None,
+    }
+
+
+def test_accumulate_lead_ignore_message_deja_vu():
+    bot = _bare_bot()
+    rec = _msg("m1")
+    bot._accumulate_lead(1, "T", rec)
+    bot._accumulate_lead(1, "T", rec)  # même message_id (on_thread_create + on_message)
+    assert len(bot._thread_leads[1]["messages"]) == 1
+
+
+def test_push_thread_lead_pas_de_double_push_si_inchange():
+    calls = []
+    bot = _bare_bot(push_lead=lambda data: calls.append(data) or {"id": "p1"})
+    bot._accumulate_lead(1, "T", _msg("m1"))
+    bot._push_thread_lead(1)
+    bot._push_thread_lead(1)  # rien n'a changé → pas de second appel
+    assert len(calls) == 1
+
+
+def test_push_thread_lead_repousse_si_nouveau_message():
+    calls = []
+    bot = _bare_bot(push_lead=lambda data: calls.append(data) or {"id": "p1"})
+    bot._accumulate_lead(1, "T", _msg("m1"))
+    bot._push_thread_lead(1)
+    bot._accumulate_lead(1, "T", _msg("m2", "autre"))  # nouveau message
+    bot._push_thread_lead(1)
+    assert len(calls) == 2
