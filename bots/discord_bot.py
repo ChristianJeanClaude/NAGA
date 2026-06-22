@@ -339,16 +339,20 @@ def _sort_liens(liens, raw_text=""):
 def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tags=None, game=None, raw_text=""):
     """Construit le dict attendu par notion_leads.push_to_notion pour un thread.
 
-    Agrège la conversation du thread ; déduplique et trie les liens par catégorie ;
-    tronque « messages » et « liens » à la limite Notion.
+    Agrège la conversation du thread ; déduplique et trie les liens par catégorie.
+    « messages_full » contient la conversation intégrale (écrite dans le corps de
+    la page Notion) ; « messages » n'en garde qu'un aperçu (2000 derniers
+    caractères, soit les échanges les plus récents) pour la vue tableau.
     raw_text : texte brut des messages (URLs incluses) pour la détection exec_doc.
     """
     steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters, fathoms, drives, instagrams, canvas, website_studio, autres_steam, autres = _sort_liens(liens, raw_text)
+    conversation = "\n\n".join(messages)
     payload = {
         "nom_du_jeu": title,
         "source": "Discord #leads",
         "date": date,
-        "messages": "\n\n".join(messages)[:LEAD_TEXT_LIMIT],
+        "messages": conversation[-LEAD_TEXT_LIMIT:],   # aperçu : messages récents
+        "messages_full": conversation,                  # intégral : corps de page
         "liens": "\n".join(autres)[:LEAD_TEXT_LIMIT],
         "pieces_jointes": list(dict.fromkeys(pieces)),
     }

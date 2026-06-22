@@ -207,3 +207,56 @@ def test_managed_columns_contient_les_cles_du_crm():
 def test_dernier_echange_dans_always_update():
     # La date du dernier message doit être rafraîchie à chaque push.
     assert "Dernier échange" in notion_leads.ALWAYS_UPDATE
+
+
+# --- corps de page : conversation intégrale (blocs) --------------------------
+
+def _para_texts(blocks):
+    return [b["paragraph"]["rich_text"][0]["text"]["content"] for b in blocks if b["type"] == "paragraph"]
+
+
+def test_chunk_text_respecte_limite_utf16():
+    chunks = notion_leads._chunk_text("a" * 5000, 2000)
+    assert all(_utf16_units(c) <= 2000 for c in chunks)
+    assert "".join(chunks) == "a" * 5000
+
+
+def test_chunk_text_emoji_respecte_limite():
+    chunks = notion_leads._chunk_text("🧱" * 1500, 2000)  # 3000 unités UTF-16
+    assert all(_utf16_units(c) <= 2000 for c in chunks)
+    assert "".join(chunks) == "🧱" * 1500
+
+
+def test_conversation_blocks_marqueur_en_tete():
+    blocks = notion_leads._conversation_blocks("salut")
+    assert blocks[0]["type"] == "heading_2"
+    assert blocks[0]["heading_2"]["rich_text"][0]["text"]["content"] == notion_leads.CONV_MARKER
+
+
+def test_conversation_blocks_paragraphes_sous_limite():
+    blocks = notion_leads._conversation_blocks("x" * 5000)
+    paras = _para_texts(blocks)
+    assert paras and all(_utf16_units(p) <= 2000 for p in paras)
+    assert "".join(paras) == "x" * 5000  # aucun caractère perdu (message unique)
+
+
+def test_conversation_blocks_tous_les_messages_presents():
+    full = "\n\n".join(f"message numero {i}" for i in range(50))
+    paras = _para_texts(notion_leads._conversation_blocks(full))
+    joined = "\n".join(paras)
+    for i in range(50):
+        assert f"message numero {i}" in joined
+
+
+def test_conversation_blocks_vide():
+    blocks = notion_leads._conversation_blocks("")
+    assert len(blocks) == 1 and blocks[0]["type"] == "heading_2"  # juste le marqueur
+
+
+def test_conv_sig_deterministe_et_sensible():
+    assert notion_leads._conv_sig("abc") == notion_leads._conv_sig("abc")
+    assert notion_leads._conv_sig("abc") != notion_leads._conv_sig("abd")
+
+
+def test_conv_sync_dans_managed_columns():
+    assert "Conv sync" in notion_leads.MANAGED_COLUMNS

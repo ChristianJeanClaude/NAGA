@@ -136,11 +136,23 @@ def test_build_lead_payload_complet():
         "source": "Discord #leads",
         "date": "2026-06-01T08:14:23+00:00",
         "messages": "Premier message\n\nDeuxième message",
+        "messages_full": "Premier message\n\nDeuxième message",
         "liens": "",
         "pieces_jointes": ["https://cdn.discord/a.png"],
         "steam_url": "https://store.steampowered.com/app/1",
         "kickstarter": "https://kickstarter.com/x",
     }
+
+
+def test_build_lead_payload_apercu_recent_et_integral():
+    # Conversation > 2000 car. : messages_full = intégral, messages = 2000 derniers.
+    msgs = ["a" * 1500, "b" * 1500]
+    payload = discord_bot.build_lead_payload("Jeu", msgs, [], [], "2026-06-01")
+    conversation = "a" * 1500 + "\n\n" + "b" * 1500
+    assert payload["messages_full"] == conversation
+    assert payload["messages"] == conversation[-discord_bot.LEAD_TEXT_LIMIT:]
+    assert len(payload["messages"]) == discord_bot.LEAD_TEXT_LIMIT
+    assert payload["messages"].endswith("b" * 100)  # l'aperçu montre bien le récent
 
 
 def test_build_lead_payload_dedup_liens_et_pieces():

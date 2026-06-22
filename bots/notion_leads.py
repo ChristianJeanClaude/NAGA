@@ -6,6 +6,7 @@ client Notion principal du bot ; ``.get(..., "")`` garde l'import sûr si la cl�
 est absente (l'échec surviendra alors lors de l'appel HTTP, pas à l'import).
 """
 
+import hashlib
 import json
 import os
 import urllib.error
@@ -85,7 +86,15 @@ MANAGED_COLUMNS = {
     "Tags": {"multi_select": {}},
     "Summary": {"rich_text": {}},
     "Dernier résumé": {"date": {}},
+    "Conv sync": {"rich_text": {}},          # technique : empreinte de la conversation écrite dans le corps
 }
+
+# Titre du bloc qui ouvre la section conversation dans le corps de la page.
+# Sert de marqueur : tout ce qui le suit appartient au bot et est réécrit ;
+# le contenu humain placé AU-DESSUS du marqueur est préservé.
+CONV_MARKER = "💬 Conversation Discord (synchronisée automatiquement)"
+# Nombre max de blocs par requête d'ajout d'enfants (limite API Notion).
+NOTION_CHILDREN_BATCH = 100
 
 # Sous-ensemble rich_text (utilisé pour la correction de type et les tests).
 RICH_TEXT_COLUMNS = tuple(name for name, spec in MANAGED_COLUMNS.items() if "rich_text" in spec)
@@ -113,6 +122,98 @@ def _truncate_utf16(content: str, limit: int) -> str:
 def _rich_text(content: str) -> dict:
     """Construit une propriété rich_text en tronquant à la limite Notion (2000 unités UTF-16)."""
     return {"rich_text": [{"text": {"content": _truncate_utf16(content, NOTION_RICH_TEXT_LIMIT)}}]}
+
+
+def _prop_text(prop: dict) -> str:
+    """Texte brut d'une propriété rich_text (ou '' si absente)."""
+    if not prop:
+        return ""
+    return "".join(t.get("plain_text", "") for t in prop.get("rich_text", []))
+
+
+def _conv_sig(text: str) -> str:
+    """Empreinte de la conversation : ne réécrire le corps que si elle change."""
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def _chunk_text(text: str, limit: int) -> list:
+    """Découpe `text` en morceaux d'au plus `limit` unités UTF-16."""
+    chunks = []
+    rest = text
+    while rest:
+        head = _truncate_utf16(rest, limit)
+        chunks.append(head)
+        rest = rest[len(head):]
+    return chunks
+
+
+def _conversation_blocks(full_text: str) -> list:
+    """Construit les blocs du corps : un marqueur (heading) + des paragraphes.
+
+    Les messages (séparés par « \\n\\n ») sont regroupés en paragraphes d'au plus
+    2000 unités UTF-16 ; un message plus long est lui-même redécoupé.
+    """
+    blocks = [{
+        "object": "block", "type": "heading_2",
+        "heading_2": {"rich_text": [{"type": "text", "text": {"content": CONV_MARKER}}]},
+    }]
+
+    def paragraph(content):
+        return {
+            "object": "block", "type": "paragraph",
+            "paragraph": {"rich_text": [{"type": "text", "text": {"content": content}}]},
+        }
+
+    current = ""
+    for msg in (full_text.split("\n\n") if full_text else []):
+        candidate = msg if not current else f"{current}\n\n{msg}"
+        if len(candidate.encode("utf-16-le")) // 2 <= NOTION_RICH_TEXT_LIMIT:
+            current = candidate
+        else:
+            if current:
+                blocks.extend(paragraph(p) for p in _chunk_text(current, NOTION_RICH_TEXT_LIMIT))
+            current = msg
+    if current:
+        blocks.extend(paragraph(p) for p in _chunk_text(current, NOTION_RICH_TEXT_LIMIT))
+    return blocks
+
+
+def _get_all_children(block_id: str) -> list:
+    """Tous les blocs enfants d'une page/bloc (paginé)."""
+    children, cursor = [], None
+    while True:
+        path = f"/blocks/{block_id}/children?page_size=100"
+        if cursor:
+            path += f"&start_cursor={cursor}"
+        r = _request("GET", path)
+        children.extend(r.get("results", []))
+        if not r.get("has_more"):
+            break
+        cursor = r.get("next_cursor")
+    return children
+
+
+def _sync_conversation_body(page_id: str, full_text: str) -> None:
+    """Réécrit l'intégralité de la conversation dans le corps de la page.
+
+    Supprime l'ancienne section du bot (marqueur + blocs suivants) puis réécrit,
+    en préservant tout contenu humain situé avant le marqueur.
+    """
+    children = _get_all_children(page_id)
+    marker_idx = None
+    for i, b in enumerate(children):
+        if b.get("type") == "heading_2":
+            txt = "".join(t.get("plain_text", "") for t in b["heading_2"].get("rich_text", []))
+            if txt.startswith("💬 Conversation Discord"):
+                marker_idx = i
+                break
+    if marker_idx is not None:
+        for b in children[marker_idx:]:
+            _request("DELETE", f"/blocks/{b['id']}")
+
+    blocks = _conversation_blocks(full_text)
+    for i in range(0, len(blocks), NOTION_CHILDREN_BATCH):
+        _request("PATCH", f"/blocks/{page_id}/children", {"children": blocks[i:i + NOTION_CHILDREN_BATCH]})
 
 
 def _is_empty(prop: dict) -> bool:
@@ -207,8 +308,15 @@ def push_to_notion(data: dict) -> dict:
         "email":          str,           # contact du studio
     }
 
+    La conversation intégrale (``messages_full``) est écrite dans le CORPS de la
+    page (blocs), sans coupure ; la propriété ``Messages`` n'en garde qu'un aperçu.
+
     Retourne {"action": "created"|"updated", "id": "<page_id>"}.
     """
+    # Conversation intégrale destinée au corps de page (repli sur l'aperçu).
+    full_text = data.get("messages_full") or data.get("messages") or ""
+    sig = _conv_sig(full_text) if full_text else ""
+
     if data.get("thread_id"):
         result = _request("POST", f"/databases/{DB_ID}/query", {
             "filter": {
@@ -229,19 +337,29 @@ def push_to_notion(data: dict) -> dict:
     if result["results"]:
         page_id = result["results"][0]["id"]
         existing_props = _request("GET", f"/pages/{page_id}").get("properties", {})
+        # Corps à réécrire seulement si la conversation a changé (empreinte).
+        body_changed = bool(full_text) and _prop_text(existing_props.get("Conv sync")) != sig
         patch = {
             name: value
             for name, value in properties.items()
             if name in ALWAYS_UPDATE or _is_empty(existing_props.get(name, {}))
         }
+        if body_changed:
+            patch["Conv sync"] = _rich_text(sig)
         if patch:
             _request("PATCH", f"/pages/{page_id}", {"properties": patch})
+        if body_changed:
+            _sync_conversation_body(page_id, full_text)
         return {"action": "updated", "id": page_id}
     else:
+        if full_text:
+            properties["Conv sync"] = _rich_text(sig)
         page = _request("POST", "/pages", {
             "parent": {"database_id": DB_ID},
             "properties": properties,
         })
+        if full_text:
+            _sync_conversation_body(page["id"], full_text)
         return {"action": "created", "id": page["id"]}
 
 
