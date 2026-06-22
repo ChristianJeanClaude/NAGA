@@ -352,7 +352,8 @@ def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tag
         "source": "Discord #leads",
         "date": date,
         "messages": conversation[-LEAD_TEXT_LIMIT:],   # aperçu : messages récents
-        "messages_full": conversation,                  # intégral : corps de page
+        "messages_full": conversation,                  # intégral (empreinte/repli)
+        "messages_list": list(messages),                # un message = un bloc dans le corps
         "liens": "\n".join(autres)[:LEAD_TEXT_LIMIT],
         "pieces_jointes": list(dict.fromkeys(pieces)),
     }

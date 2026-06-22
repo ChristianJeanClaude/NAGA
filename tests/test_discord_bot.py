@@ -137,6 +137,7 @@ def test_build_lead_payload_complet():
         "date": "2026-06-01T08:14:23+00:00",
         "messages": "Premier message\n\nDeuxième message",
         "messages_full": "Premier message\n\nDeuxième message",
+        "messages_list": ["Premier message", "Deuxième message"],
         "liens": "",
         "pieces_jointes": ["https://cdn.discord/a.png"],
         "steam_url": "https://store.steampowered.com/app/1",
@@ -153,6 +154,7 @@ def test_build_lead_payload_apercu_recent_et_integral():
     assert payload["messages"] == conversation[-discord_bot.LEAD_TEXT_LIMIT:]
     assert len(payload["messages"]) == discord_bot.LEAD_TEXT_LIMIT
     assert payload["messages"].endswith("b" * 100)  # l'aperçu montre bien le récent
+    assert payload["messages_list"] == msgs          # un message = un bloc dans le corps
 
 
 def test_build_lead_payload_dedup_liens_et_pieces():

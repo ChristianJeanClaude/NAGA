@@ -228,28 +228,39 @@ def test_chunk_text_emoji_respecte_limite():
 
 
 def test_conversation_blocks_marqueur_en_tete():
-    blocks = notion_leads._conversation_blocks("salut")
+    blocks = notion_leads._conversation_blocks(["salut"])
     assert blocks[0]["type"] == "heading_2"
     assert blocks[0]["heading_2"]["rich_text"][0]["text"]["content"] == notion_leads.CONV_MARKER
 
 
-def test_conversation_blocks_paragraphes_sous_limite():
-    blocks = notion_leads._conversation_blocks("x" * 5000)
+def test_conversation_blocks_un_bloc_par_message():
+    blocks = notion_leads._conversation_blocks(["msg A", "msg B", "msg C"])
     paras = _para_texts(blocks)
-    assert paras and all(_utf16_units(p) <= 2000 for p in paras)
-    assert "".join(paras) == "x" * 5000  # aucun caractère perdu (message unique)
+    assert paras == ["msg A", "msg B", "msg C"]  # un paragraphe par message
 
 
-def test_conversation_blocks_tous_les_messages_presents():
-    full = "\n\n".join(f"message numero {i}" for i in range(50))
-    paras = _para_texts(notion_leads._conversation_blocks(full))
-    joined = "\n".join(paras)
-    for i in range(50):
-        assert f"message numero {i}" in joined
+def test_conversation_blocks_message_long_redecoupe():
+    # Un message > 2000 unités UTF-16 s'étale sur plusieurs blocs, sans perte.
+    blocks = notion_leads._conversation_blocks(["x" * 5000])
+    paras = _para_texts(blocks)
+    assert len(paras) >= 2 and all(_utf16_units(p) <= 2000 for p in paras)
+    assert "".join(paras) == "x" * 5000
+
+
+def test_conversation_blocks_message_avec_lignes_internes_reste_un_bloc():
+    # Un message contenant une ligne vide interne ne doit PAS être scindé.
+    blocks = notion_leads._conversation_blocks(["Titre\n\nDétail sur deux paragraphes"])
+    paras = _para_texts(blocks)
+    assert paras == ["Titre\n\nDétail sur deux paragraphes"]
+
+
+def test_conversation_blocks_ignore_messages_vides():
+    blocks = notion_leads._conversation_blocks(["", "   ", "vrai message"])
+    assert _para_texts(blocks) == ["vrai message"]
 
 
 def test_conversation_blocks_vide():
-    blocks = notion_leads._conversation_blocks("")
+    blocks = notion_leads._conversation_blocks([])
     assert len(blocks) == 1 and blocks[0]["type"] == "heading_2"  # juste le marqueur
 
 

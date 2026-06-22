@@ -147,34 +147,26 @@ def _chunk_text(text: str, limit: int) -> list:
     return chunks
 
 
-def _conversation_blocks(full_text: str) -> list:
-    """Construit les blocs du corps : un marqueur (heading) + des paragraphes.
+def _conversation_blocks(messages: list) -> list:
+    """Construit les blocs du corps : un marqueur (heading) + un paragraphe par message.
 
-    Les messages (séparés par « \\n\\n ») sont regroupés en paragraphes d'au plus
-    2000 unités UTF-16 ; un message plus long est lui-même redécoupé.
+    Chaque message devient son propre bloc paragraphe (séparation naturelle entre
+    blocs Notion). Un message dépassant 2000 unités UTF-16 est redécoupé en
+    plusieurs blocs. Les messages vides sont ignorés.
     """
     blocks = [{
         "object": "block", "type": "heading_2",
         "heading_2": {"rich_text": [{"type": "text", "text": {"content": CONV_MARKER}}]},
     }]
-
-    def paragraph(content):
-        return {
-            "object": "block", "type": "paragraph",
-            "paragraph": {"rich_text": [{"type": "text", "text": {"content": content}}]},
-        }
-
-    current = ""
-    for msg in (full_text.split("\n\n") if full_text else []):
-        candidate = msg if not current else f"{current}\n\n{msg}"
-        if len(candidate.encode("utf-16-le")) // 2 <= NOTION_RICH_TEXT_LIMIT:
-            current = candidate
-        else:
-            if current:
-                blocks.extend(paragraph(p) for p in _chunk_text(current, NOTION_RICH_TEXT_LIMIT))
-            current = msg
-    if current:
-        blocks.extend(paragraph(p) for p in _chunk_text(current, NOTION_RICH_TEXT_LIMIT))
+    for msg in (messages or []):
+        msg = (msg or "").strip()
+        if not msg:
+            continue
+        for piece in _chunk_text(msg, NOTION_RICH_TEXT_LIMIT):
+            blocks.append({
+                "object": "block", "type": "paragraph",
+                "paragraph": {"rich_text": [{"type": "text", "text": {"content": piece}}]},
+            })
     return blocks
 
 
@@ -193,7 +185,7 @@ def _get_all_children(block_id: str) -> list:
     return children
 
 
-def _sync_conversation_body(page_id: str, full_text: str) -> None:
+def _sync_conversation_body(page_id: str, messages: list) -> None:
     """Réécrit l'intégralité de la conversation dans le corps de la page.
 
     Supprime l'ancienne section du bot (marqueur + blocs suivants) puis réécrit,
@@ -211,7 +203,7 @@ def _sync_conversation_body(page_id: str, full_text: str) -> None:
         for b in children[marker_idx:]:
             _request("DELETE", f"/blocks/{b['id']}")
 
-    blocks = _conversation_blocks(full_text)
+    blocks = _conversation_blocks(messages)
     for i in range(0, len(blocks), NOTION_CHILDREN_BATCH):
         _request("PATCH", f"/blocks/{page_id}/children", {"children": blocks[i:i + NOTION_CHILDREN_BATCH]})
 
@@ -315,6 +307,9 @@ def push_to_notion(data: dict) -> dict:
     """
     # Conversation intégrale destinée au corps de page (repli sur l'aperçu).
     full_text = data.get("messages_full") or data.get("messages") or ""
+    messages_list = data.get("messages_list")
+    if messages_list is None:
+        messages_list = [full_text] if full_text else []
     sig = _conv_sig(full_text) if full_text else ""
 
     if data.get("thread_id"):
@@ -349,7 +344,7 @@ def push_to_notion(data: dict) -> dict:
         if patch:
             _request("PATCH", f"/pages/{page_id}", {"properties": patch})
         if body_changed:
-            _sync_conversation_body(page_id, full_text)
+            _sync_conversation_body(page_id, messages_list)
         return {"action": "updated", "id": page_id}
     else:
         if full_text:
@@ -359,7 +354,7 @@ def push_to_notion(data: dict) -> dict:
             "properties": properties,
         })
         if full_text:
-            _sync_conversation_body(page["id"], full_text)
+            _sync_conversation_body(page["id"], messages_list)
         return {"action": "created", "id": page["id"]}
 
 
