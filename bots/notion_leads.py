@@ -131,9 +131,16 @@ def _prop_text(prop: dict) -> str:
     return "".join(t.get("plain_text", "") for t in prop.get("rich_text", []))
 
 
+# Version de la disposition des blocs du corps. À incrémenter quand le FORMAT
+# change (pas juste le contenu) : l'empreinte intègre cette version, ce qui force
+# la réécriture de tous les corps existants une fois, dans la nouvelle disposition.
+#   v1 : paragraphes groupés (≤2000 car.)   v2 : un bloc paragraphe par message
+_BODY_FORMAT_VERSION = "2"
+
+
 def _conv_sig(text: str) -> str:
-    """Empreinte de la conversation : ne réécrire le corps que si elle change."""
-    return hashlib.md5(text.encode("utf-8")).hexdigest()
+    """Empreinte (conversation + version de format) : ne réécrire le corps que si l'une change."""
+    return hashlib.md5(f"{_BODY_FORMAT_VERSION}\x00{text}".encode("utf-8")).hexdigest()
 
 
 def _chunk_text(text: str, limit: int) -> list:
