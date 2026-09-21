@@ -1,9 +1,11 @@
 """Logique principale du bot Discord.
 
 Le bot écoute les réactions ajoutées aux messages du canal de scouting. Quand
-deux membres réagissent à un message contenant un lien Steam, le bot déclenche
-le pipeline de scouting : extraction de l'App ID, agrégation des données
-(Steam / SteamSpy), puis création d'une fiche dans Notion.
+deux membres (hors bots) mettent 👍 sur un message contenant un lien Steam, le
+bot déclenche le pipeline de scouting : extraction de l'App ID, agrégation des
+données (Steam / SteamSpy), puis création d'une fiche dans Notion. Quand deux
+membres mettent 👎, le jeu est rejeté : la fiche n'est pas créée, ou elle est
+archivée si elle existe déjà.
 
 La déduplication repose sur le cache local (``services.cache``) : un même
 message n'est traité qu'une seule fois, même si plusieurs réactions arrivent.
@@ -19,6 +21,7 @@ from config import DISCORD_CHANNEL_ID
 from services.cache import is_processed, mark_processed
 from services.steam import extract_app_id, fetch_game_data
 from services.notion import (
+    archive_rejected_page,
     create_game_page,
     find_existing_page,
     get_page_id,
@@ -34,6 +37,19 @@ intents.reactions = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+THUMBS_UP = "👍"
+THUMBS_DOWN = "👎"
+# Nombre de membres distincts (hors bots) requis pour valider ou rejeter un jeu.
+# Le 👍/👎 ajouté par le bot n'est pas compté : le compteur Discord affiche +1.
+VOTE_THRESHOLD = 2
+# Modificateurs de teint : 👍🏽 choisi dans le sélecteur = réaction distincte de 👍.
+_SKIN_TONES = "\U0001F3FB\U0001F3FC\U0001F3FD\U0001F3FE\U0001F3FF"
+
+
+def _base_emoji(emoji) -> str:
+    """Emoji sans modificateur de teint (👍🏽 → 👍)."""
+    return str(emoji).rstrip(_SKIN_TONES)
 
 
 @bot.event
@@ -63,8 +79,17 @@ async def on_message(message: discord.Message) -> None:
         return
 
     # Only add reactions if game is not already scouted
-    for emoji in ["👍", "👎"]:
+    for emoji in (THUMBS_UP, THUMBS_DOWN):
         await message.add_reaction(emoji)
+
+
+async def _human_voters(message: discord.Message, emoji: str) -> set[int]:
+    """IDs des membres (hors bots) ayant réagi avec ``emoji`` (tout teint)."""
+    voters: set[int] = set()
+    for reaction in message.reactions:
+        if _base_emoji(reaction.emoji) == emoji:
+            voters |= {user.id async for user in reaction.users() if not user.bot}
+    return voters
 
 
 async def _mark_outreached(app_id: int) -> None:
@@ -107,7 +132,9 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     1. Ignore si le canal n'est pas DISCORD_CHANNEL_ID.
     2. Ignore les réactions du bot lui-même.
     3. Récupère le message et en extrait l'App ID Steam (ignore si absent).
-    4. Exige qu'au moins 2 utilisateurs distincts (hors bots) aient réagi.
+       Seules les réactions ✅, 👍 et 👎 sont prises en compte.
+    4. 👎 : dès ``VOTE_THRESHOLD`` membres, archive la fiche Notion du jeu.
+       👍 : exige ``VOTE_THRESHOLD`` membres, et pas autant de 👎.
     5. Ignore si le message a déjà été traité (cache).
     6. Si une fiche Notion existe déjà pour cet App ID, marque comme traité
        et s'arrête (évite les doublons).
@@ -119,8 +146,11 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if payload.channel_id != DISCORD_CHANNEL_ID:
         return
 
-    # 2. Ignorer les réactions du bot lui-même.
+    # 2. Ignorer les réactions du bot lui-même et les emojis sans rôle.
     if bot.user is not None and payload.user_id == bot.user.id:
+        return
+    emoji = _base_emoji(payload.emoji)
+    if emoji not in ("✅", THUMBS_UP, THUMBS_DOWN):
         return
 
     # 3. Récupérer le canal et le message.
@@ -157,8 +187,8 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         return
 
     # Réaction ✅ → marquer "Outreached?" dans Notion. Doit s'exécuter AVANT le
-    # seuil de 2 réactions : un seul ✅ suffit à déclencher l'Outreach.
-    if str(payload.emoji) == "✅":
+    # seuil de votes : un seul ✅ suffit à déclencher l'Outreach.
+    if emoji == "✅":
         # Extraction de l'App ID depuis le contenu ou l'embed.
         app_id = extract_app_id(message.content)
         if app_id is None and message.embeds:
@@ -177,13 +207,17 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         # Pas de lien Steam dans ce message : rien à scouter.
         return
 
-    # 4. Seuil : au moins 2 utilisateurs distincts (hors bots) doivent avoir réagi.
-    unique_user_ids: set[int] = set()
-    for reaction in message.reactions:
-        async for user in reaction.users():
-            if not user.bot:
-                unique_user_ids.add(user.id)
-    if len(unique_user_ids) < 2:
+    # 4a. 👎 : jeu rejeté → retirer sa fiche de la base Notion.
+    if emoji == THUMBS_DOWN:
+        if len(await _human_voters(message, THUMBS_DOWN)) >= VOTE_THRESHOLD:
+            await archive_rejected_page(app_id, message.jump_url)
+        return
+
+    # 4b. 👍 : seuil de membres distincts (hors bots), sauf si le jeu est rejeté.
+    if len(await _human_voters(message, THUMBS_UP)) < VOTE_THRESHOLD:
+        return
+    if len(await _human_voters(message, THUMBS_DOWN)) >= VOTE_THRESHOLD:
+        logger.info("Jeu rejeté par 👎 (app_id=%s), fiche non créée.", app_id)
         return
 
     # 5. Déduplication locale : ne pas retraiter le même message.

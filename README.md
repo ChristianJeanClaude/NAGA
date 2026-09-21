@@ -176,10 +176,16 @@ least the following permissions in the scouting channel:
 2. The bot checks Notion: if the game already exists, it posts a short
    "already scouted" notice and stops. Otherwise it adds two voting reactions
    (👍 👎).
-3. Once **two distinct (non-bot) members** have reacted, the bot fetches the
-   game's data from Steam, the store page, and SteamSpy, computes the relevance
-   score, and creates a Notion entry. The bot stays silent — no confirmation
-   message is posted; progress is logged to the console only.
+3. Once **two distinct (non-bot) members** have reacted 👍, the bot fetches
+   the game's data from Steam, the store page, and SteamSpy, computes the
+   relevance score, and creates a Notion entry. Only 👍 counts (any skin tone);
+   the bot's own 👍 is not counted, so Discord shows "👍 3" at that point. The
+   bot stays silent — no confirmation message is posted; progress is logged to
+   the console only.
+4. Once **two distinct (non-bot) members** have reacted 👎, the game is
+   rejected: no Notion entry is created, and an entry already created from that
+   message is archived (sent to the Notion trash) unless it is already marked
+   `Outreached?`.
 
 ## Bot Flow Diagram
 
@@ -197,7 +203,8 @@ Post duplicate      Add 2 reactions
 notice; stop        👍 👎
                         │
                         ▼
-            ≥ 2 distinct human reactions
+            ≥ 2 distinct humans 👍 (and < 2 👎)
+            (≥ 2 👎 → archive the entry instead)
                         │
                         ▼
             on_raw_reaction_add

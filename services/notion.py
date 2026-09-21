@@ -112,6 +112,46 @@ async def get_all_app_ids() -> set[int]:
     return app_ids
 
 
+async def archive_rejected_page(app_id: int, discord_message_url: str) -> int:
+    """Archive la fiche d'un jeu rejeté (👎) sur Discord.
+
+    Ne cible que la fiche créée depuis ce message Discord et pas encore
+    Outreached : une fiche ajoutée à la main ou déjà en discussion avec le dev
+    n'est jamais touchée. Archiver envoie la page dans la corbeille Notion
+    (récupérable). Retourne le nombre de fiches archivées ; en cas d'erreur de
+    l'API Notion, journalise et retourne 0.
+    """
+    try:
+        response = await client.databases.query(
+            database_id=str(NOTION_DATABASE_ID),
+            filter={
+                "and": [
+                    {"property": "Steam App ID", "number": {"equals": app_id}},
+                    {
+                        "property": "Discord Message URL",
+                        "url": {"equals": discord_message_url},
+                    },
+                    {"property": "Outreached?", "checkbox": {"equals": False}},
+                ]
+            },
+        )
+        pages = response.get("results", [])
+        for page in pages:
+            await client.pages.update(page_id=page["id"], archived=True)
+            logger.info(
+                "Fiche Notion archivée (👎) pour app_id=%s : %s",
+                app_id,
+                page.get("url"),
+            )
+    except Exception:
+        logger.error(
+            "Échec de l'archivage Notion pour app_id=%s", app_id, exc_info=True
+        )
+        return 0
+
+    return len(pages)
+
+
 async def create_game_page(game: GameData) -> str:
     """Crée une nouvelle fiche Notion à partir d'un ``GameData``.
 
