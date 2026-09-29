@@ -215,30 +215,48 @@ def build_message_record(message):
             }
             for att in message.attachments
         ],
+        # Message posté par un webhook (ex. skill naga-sync-echanges qui poste les
+        # mises à jour des jeux) : c'est un échange à faire entrer dans le CRM.
+        "webhook": getattr(message, "webhook_id", None) is not None,
         "game": None,
     }
+
+
+def accepte_auteur(message):
+    """Vrai si le message doit être agrégé : humain, ou webhook du serveur.
+
+    Les autres bots restent ignorés. Seul un admin du serveur peut créer un
+    webhook ; ils servent à faire entrer dans le thread des échanges tenus
+    ailleurs (emails, DMs), qui doivent remonter au CRM comme le reste.
+    """
+    return not message.author.bot or getattr(message, "webhook_id", None) is not None
 
 
 # Limite Notion d'un rich_text : le module Leads ne découpe pas, on tronque.
 LEAD_TEXT_LIMIT = 2000
 
 
-def clean_message_text(text, author_display_name, timestamp):
+def clean_message_text(text, author_display_name, timestamp, keep_previews=False):
     """Nettoie le texte d'un message Discord et le préfixe [DD/MM/YYYY HH:MM - auteur].
 
     Supprime URLs, blocs preview Steam, patterns de citation, lignes vides multiples.
     Retourne toujours une chaîne (au minimum le préfixe) même si le texte est vide.
+
+    ``keep_previews`` conserve les paragraphes que le filtre des aperçus Steam et
+    des citations supprimerait : une mise à jour postée par webhook peut
+    légitimement contenir « Steam page en ligne » ou « Kickstarter en mai ».
     """
     cleaned = re.sub(r"https?://\S+", "", text or "")
 
-    paragraphs = re.split(r"\n{2,}", cleaned)
-    kept = [
-        p for p in paragraphs
-        if not any(_STEAM_PREVIEW_LINE_RE.search(line) for line in p.splitlines())
-    ]
-    cleaned = "\n\n".join(kept)
+    if not keep_previews:
+        paragraphs = re.split(r"\n{2,}", cleaned)
+        kept = [
+            p for p in paragraphs
+            if not any(_STEAM_PREVIEW_LINE_RE.search(line) for line in p.splitlines())
+        ]
+        cleaned = "\n\n".join(kept)
 
-    cleaned = _CITATION_RE.sub("", cleaned)
+        cleaned = _CITATION_RE.sub("", cleaned)
 
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
@@ -745,7 +763,7 @@ class NagaScraperBot(discord.Client):
         )
 
     async def on_message(self, message):
-        if message.author.bot or not self._is_target(message.channel):
+        if not accepte_auteur(message) or not self._is_target(message.channel):
             return
         await self.process_message(message)
         self._push_thread_lead(message.channel.id)
@@ -861,7 +879,10 @@ class NagaScraperBot(discord.Client):
             return
         acc["seen"].add(record["message_id"])
         acc["messages"].append(
-            clean_message_text(record["text"], record["author"]["display_name"], record["timestamp"])
+            clean_message_text(
+                record["text"], record["author"]["display_name"], record["timestamp"],
+                keep_previews=record.get("webhook", False),
+            )
         )
         raw = record["text"] or ""
         embed = record.get("embed_text", "")

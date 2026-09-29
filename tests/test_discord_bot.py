@@ -765,3 +765,43 @@ def test_push_thread_lead_repousse_si_nouveau_message():
     bot._accumulate_lead(1, "T", _msg("m2", "autre"))  # nouveau message
     bot._push_thread_lead(1)
     assert len(calls) == 2
+
+
+# --- messages postés par webhook (skill naga-sync-echanges) -------------------
+
+def test_build_message_record_sans_webhook():
+    assert discord_bot.build_message_record(_fake_message())["webhook"] is False
+
+
+def test_build_message_record_webhook():
+    message = _fake_message()
+    message.webhook_id = 1234
+    assert discord_bot.build_message_record(message)["webhook"] is True
+
+
+def test_accepte_auteur_humain():
+    message = SimpleNamespace(author=SimpleNamespace(bot=False))
+    assert discord_bot.accepte_auteur(message) is True
+
+
+def test_accepte_auteur_bot_ignore():
+    message = SimpleNamespace(author=SimpleNamespace(bot=True), webhook_id=None)
+    assert discord_bot.accepte_auteur(message) is False
+
+
+def test_accepte_auteur_webhook_accepte():
+    message = SimpleNamespace(author=SimpleNamespace(bot=True), webhook_id=987)
+    assert discord_bot.accepte_auteur(message) is True
+
+
+def test_clean_message_text_webhook_garde_les_paragraphes_steam():
+    text = "Mise à jour\n\nSteam page en ligne et Kickstarter en mai.\n\nSuite"
+    result = discord_bot.clean_message_text(text, "Échanges email", _TS, keep_previews=True)
+    assert "Steam page en ligne" in result
+    assert "Suite" in result
+
+
+def test_clean_message_text_webhook_supprime_quand_meme_les_urls():
+    text = "Deck: https://docs.google.com/presentation/d/abc"
+    result = discord_bot.clean_message_text(text, "Échanges email", _TS, keep_previews=True)
+    assert "https://" not in result
