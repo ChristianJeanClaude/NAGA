@@ -1041,3 +1041,34 @@ def test_process_message_ne_logge_pas_le_contenu(monkeypatch):
     assert "999" in joined
     for secret in ("dev@studio.io", "+33", "Alice", "alice#0001", "screenshot.png"):
         assert secret not in joined
+
+
+# --- Website studio : pas de plateforme tierce --------------------------------
+
+def test_sort_liens_linktree_va_dans_liens():
+    r = _sort(["https://linktr.ee/monstudio"])
+    assert r["website_studio"] is None
+    assert r["autres"] == ["https://linktr.ee/monstudio"]
+
+
+def test_sort_liens_itch_io_et_sous_domaine_vont_dans_liens():
+    r = _sort(["https://monstudio.itch.io/mon-jeu", "https://itch.io/profile/x"])
+    assert r["website_studio"] is None
+    assert r["autres"] == ["https://monstudio.itch.io/mon-jeu", "https://itch.io/profile/x"]
+
+
+def test_sort_liens_notion_site_va_dans_liens():
+    r = _sort(["https://presskit.notion.site/Mon-Jeu-abc"])
+    assert r["website_studio"] is None
+
+
+def test_sort_liens_vrai_site_apres_une_plateforme():
+    r = _sort(["https://linktr.ee/monstudio", "https://mon-studio.fr"])
+    assert r["website_studio"] == "https://mon-studio.fr"
+    assert r["autres"] == ["https://linktr.ee/monstudio"]
+
+
+def test_is_platform_link_pas_de_faux_positif_par_suffixe():
+    assert not discord_bot._is_platform_link("https://switch.io")          # ≠ itch.io
+    assert not discord_bot._is_platform_link("https://notnotion.so.studio.fr")
+    assert discord_bot._is_platform_link("https://www.reddit.com/r/indiegaming")

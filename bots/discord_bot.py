@@ -23,6 +23,7 @@ import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -318,6 +319,20 @@ DRIVE_RE = re.compile(
 )
 INSTAGRAM_RE = re.compile(r"instagram\.com", re.IGNORECASE)
 CANVA_RE = re.compile(r"canva\.com|canva\.link", re.IGNORECASE)
+# Plateformes jamais prises pour le site du studio (agrégateurs de liens, pages
+# de store ou de doc, réseaux) : rangées dans Liens. Sous-domaines compris
+# (ex. studio.itch.io, presskit.notion.site).
+NOT_STUDIO_SITE_DOMAINS = (
+    "linktr.ee", "beacons.ai", "itch.io", "gamejolt.com", "notion.site", "notion.so",
+    "discord.gg", "discord.com", "steamcommunity.com", "bsky.app", "tiktok.com",
+    "reddit.com", "linkedin.com", "facebook.com", "twitch.tv",
+)
+
+
+def _is_platform_link(url):
+    """Vrai si l'URL pointe vers une plateforme tierce plutôt qu'un site de studio."""
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return any(host == domain or host.endswith("." + domain) for domain in NOT_STUDIO_SITE_DOMAINS)
 
 
 def _is_exec_context(url, raw_text):
@@ -339,6 +354,8 @@ def _sort_liens(liens, raw_text=""):
     - docs.google.com + contexte 'exec' → exec_docs, sinon → pitch_decks.
     - YouTube / Twitter / Fathom / Drive / Instagram / Canva : tous dans leurs listes.
     - Tout autre https sans catégorie connue → website_studio (premier), puis autres.
+      Les plateformes tierces (linktr.ee, itch.io, *.notion.site…) vont toujours
+      dans autres : ce ne sont pas des sites de studio.
     """
     steam_url = kickstarter = website_studio = None
     pitch_decks = []
@@ -382,7 +399,7 @@ def _sort_liens(liens, raw_text=""):
         elif CANVA_RE.search(url):
             canvas.append(url)
         elif url.startswith("https://"):
-            if website_studio is None:
+            if website_studio is None and not _is_platform_link(url):
                 website_studio = url
             else:
                 autres.append(url)
