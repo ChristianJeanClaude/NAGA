@@ -352,3 +352,86 @@ def test_update_patch_adoption_ne_remplit_que_les_vides():
     patch = notion_leads._update_patch(properties, existing, only_empty=True)
     assert set(patch) == {"Thread ID", "Studio"}  # titre, Messages, Tags humains intacts
     assert patch["Thread ID"]["rich_text"][0]["text"]["content"] == "1571"
+
+
+
+# --- pièces jointes : téléversement et repli ---------------------------------
+
+_CDN = "https://cdn.discordapp.com/attachments/1/2/deck%20final.pdf?ex=6b01&is=6b00&hm=af01"
+_JUMP = "https://discord.com/channels/1/2/3"
+
+
+def test_is_discord_cdn():
+    assert notion_leads._is_discord_cdn(_CDN)
+    assert notion_leads._is_discord_cdn("https://media.discordapp.net/attachments/1/2/a.png")
+    assert not notion_leads._is_discord_cdn(_JUMP)
+    assert not notion_leads._is_discord_cdn("https://cdn.discordapp.com.evil.io/a.png")
+    assert not notion_leads._is_discord_cdn(None)
+
+
+def test_filename_from_url_sans_signature():
+    assert notion_leads._filename_from_url(_CDN) == "deck final.pdf"
+
+
+def test_fallback_entry_pointe_le_message_discord():
+    entry = notion_leads._fallback_entry({"url": _CDN, "filename": "deck.pdf", "jump_url": _JUMP})
+    assert entry == {"name": "deck.pdf", "external": {"url": _JUMP}}
+
+
+def test_fallback_entry_sans_lien_du_message_garde_l_url():
+    entry = notion_leads._fallback_entry({"url": _CDN})
+    assert entry == {"name": "deck final.pdf", "external": {"url": _CDN}}
+
+
+def test_build_properties_pieces_jointes_nom_sans_query():
+    props = notion_leads._build_properties({"nom_du_jeu": "J", "pieces_jointes": [_CDN]})
+    assert props["Pièces jointes"]["files"][0]["name"] == "deck final.pdf"
+
+
+def test_build_properties_pieces_jointes_limite_notion():
+    pieces = [f"https://cdn.discordapp.com/attachments/1/{i}/a.png" for i in range(150)]
+    props = notion_leads._build_properties({"nom_du_jeu": "J", "pieces_jointes": pieces})
+    assert len(props["Pièces jointes"]["files"]) == notion_leads.NOTION_FILES_LIMIT
+
+
+def _files_prop(*files):
+    return {"type": "files", "files": list(files)}
+
+
+def _external(url):
+    return {"name": "x", "type": "external", "external": {"url": url}}
+
+
+def test_attachments_stale_liens_cdn_seulement():
+    assert notion_leads._attachments_stale(_files_prop(_external(_CDN), _external(_CDN)))
+
+
+def test_attachments_stale_faux_si_fichier_televerse_ou_lien_message():
+    uploaded = {"name": "deck.pdf", "type": "file", "file": {"url": "https://prod-files.notion/x"}}
+    assert not notion_leads._attachments_stale(_files_prop(_external(_CDN), uploaded))
+    assert not notion_leads._attachments_stale(_files_prop(_external(_JUMP)))
+    assert not notion_leads._attachments_stale(_files_prop())
+
+
+def test_attachments_writable():
+    assert notion_leads._attachments_writable(_files_prop())                    # vide
+    assert notion_leads._attachments_writable(_files_prop(_external(_CDN)))     # liens morts
+    uploaded = {"name": "a", "type": "file", "file": {"url": "https://prod-files.notion/x"}}
+    assert not notion_leads._attachments_writable(_files_prop(uploaded))        # déjà téléversé
+
+
+def test_multipart_body_champ_file():
+    body = notion_leads._multipart_body('deck "v2".pdf', "application/pdf", b"%PDF-1.4", "XYZ")
+    assert body.startswith(b"--XYZ\r\n")
+    assert b'Content-Disposition: form-data; name="file"; filename="deck \'v2\'.pdf"' in body
+    assert b"Content-Type: application/pdf\r\n\r\n%PDF-1.4\r\n--XYZ--\r\n" in body
+
+
+def test_download_refuse_un_hote_hors_cdn_discord():
+    # Vérifié avant toute requête : aucun appel réseau.
+    assert notion_leads._download_discord_attachment("https://example.com/a.pdf", 10) is None
+
+
+def test_upload_attachment_trop_lourd_sans_telechargement():
+    piece = {"url": _CDN, "size": notion_leads.MAX_UPLOAD_BYTES + 1}
+    assert notion_leads._upload_attachment(piece) is None

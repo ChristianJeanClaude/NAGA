@@ -249,6 +249,9 @@ def build_message_record(message):
             }
             for att in message.attachments
         ],
+        # Lien permanent vers le message : repli des pièces jointes, dont les
+        # URLs CDN signées (ex=/is=/hm=) expirent.
+        "jump_url": getattr(message, "jump_url", None),
         # Message posté par un webhook (ex. skill naga-sync-echanges qui poste les
         # mises à jour des jeux) : c'est un échange à faire entrer dans le CRM.
         "webhook": getattr(message, "webhook_id", None) is not None,
@@ -388,6 +391,20 @@ def _sort_liens(liens, raw_text=""):
     return steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters, fathoms, drives, instagrams, canvas, website_studio, autres_steam, autres
 
 
+def dedup_pieces(pieces):
+    """Pièces jointes dédupliquées (ordre conservé), chacune sous forme de dict.
+
+    Accepte une URL nue ou un dict ``{url, filename, content_type, size,
+    jump_url}``. La clé de dédup ignore la query : les paramètres de signature
+    du CDN Discord changent d'un fetch à l'autre pour le même fichier.
+    """
+    unique = {}
+    for piece in pieces:
+        entry = dict(piece) if isinstance(piece, dict) else {"url": piece}
+        unique.setdefault(entry["url"].split("?", 1)[0], entry)
+    return list(unique.values())
+
+
 def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tags=None, game=None, raw_text=""):
     """Construit le dict attendu par notion_leads.push_to_notion pour un thread.
 
@@ -408,7 +425,7 @@ def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tag
         "messages_full": conversation,                  # intégral (empreinte/repli)
         "messages_list": list(messages),                # un message = un bloc dans le corps
         "liens": "\n".join(autres)[:LEAD_TEXT_LIMIT],
-        "pieces_jointes": list(dict.fromkeys(pieces)),
+        "pieces_jointes": dedup_pieces(pieces),
     }
     if tags:
         payload["tags"] = tags
@@ -962,7 +979,16 @@ class NagaScraperBot(discord.Client):
         embed = record.get("embed_text", "")
         acc["raw_texts"].append(f"{raw}\n{embed}".strip())
         acc["liens"].extend(record["links"])
-        acc["pieces"].extend(att["url"] for att in record["attachments"])
+        acc["pieces"].extend(
+            {
+                "url": att["url"],
+                "filename": att.get("filename"),
+                "content_type": att.get("content_type"),
+                "size": att.get("size"),
+                "jump_url": record.get("jump_url"),
+            }
+            for att in record["attachments"]
+        )
         acc["date"] = record["timestamp"]
 
     async def _push_thread_lead(self, thread_id):

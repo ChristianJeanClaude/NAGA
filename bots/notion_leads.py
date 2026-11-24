@@ -10,7 +10,9 @@ import hashlib
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 
 import notion_rate
 
@@ -237,6 +239,167 @@ def _is_empty(prop: dict) -> bool:
     return False
 
 
+# --- Pièces jointes : téléversement dans Notion ------------------------------
+#
+# Les URLs cdn.discordapp.com sont signées (ex=/is=/hm=) et expirent : la
+# colonne « Pièces jointes » finissait en liste de liens morts. Le bot
+# télécharge donc le fichier depuis Discord (URL fraîche, obtenue au scrape)
+# et le téléverse dans Notion (File Upload API, envoi en une partie). Repli si
+# le fichier est trop lourd, d'un type refusé par Notion, ou si l'envoi
+# échoue : lien PERMANENT vers le message Discord qui porte la pièce jointe.
+
+ATTACHMENTS_PROP = "Pièces jointes"
+# Envoi en une partie : 20 Mo max côté Notion (5 Mio sur un workspace gratuit,
+# auquel cas Notion refuse l'envoi et le repli s'applique).
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+# Notion refuse plus de 100 éléments dans un tableau de propriété.
+NOTION_FILES_LIMIT = 100
+DISCORD_CDN_HOSTS = ("cdn.discordapp.com", "media.discordapp.net")
+
+
+def _is_discord_cdn(url: str) -> bool:
+    return urllib.parse.urlparse(url or "").hostname in DISCORD_CDN_HOSTS
+
+
+def _filename_from_url(url: str) -> str:
+    """Nom du fichier d'après le chemin de l'URL, sans la query de signature."""
+    return urllib.parse.unquote(urllib.parse.urlparse(url or "").path.rsplit("/", 1)[-1]) or "fichier"
+
+
+def _piece(piece) -> dict:
+    """Une pièce jointe sous forme de dict, qu'on reçoive une URL nue ou un dict."""
+    return dict(piece) if isinstance(piece, dict) else {"url": piece}
+
+
+def _attachment_name(piece: dict) -> str:
+    return (piece.get("filename") or _filename_from_url(piece.get("url")))[:100]
+
+
+def _fallback_entry(piece: dict) -> dict:
+    """Entrée « lien externe » : le message Discord (permanent) plutôt que le CDN (expire)."""
+    link = piece.get("jump_url") or piece.get("url")
+    return {"name": _attachment_name(piece), "external": {"url": link}}
+
+
+def _attachments_stale(prop: dict) -> bool:
+    """Vrai si la colonne ne contient que des liens CDN Discord écrits par l'ancien bot.
+
+    Ces liens expirent : la colonne est alors réécrite (une fois), avec des
+    fichiers téléversés. Un fichier ajouté à la main (type « file ») ou un lien
+    vers un message Discord n'est jamais remplacé.
+    """
+    files = prop.get("files") or []
+    return bool(files) and all(
+        f.get("type") == "external" and _is_discord_cdn((f.get("external") or {}).get("url"))
+        for f in files
+    )
+
+
+def _attachments_writable(prop: dict) -> bool:
+    """La colonne peut être (ré)écrite : vide, ou seulement des liens CDN périmés."""
+    return _is_empty(prop) or _attachments_stale(prop)
+
+
+def _multipart_body(filename: str, content_type: str, content: bytes, boundary: str) -> bytes:
+    """Corps multipart/form-data du champ « file » attendu par Notion."""
+    safe_name = filename.replace('"', "'").replace("\r", " ").replace("\n", " ")
+    head = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode("utf-8")
+    return head + content + f"\r\n--{boundary}--\r\n".encode("ascii")
+
+
+def _download_discord_attachment(url: str, max_bytes: int):
+    """Contenu d'une pièce jointe du CDN Discord, ou None (trop lourde, inaccessible).
+
+    Seuls les hôtes du CDN Discord sont téléchargés : jamais une URL arbitraire.
+    """
+    if not _is_discord_cdn(url):
+        return None
+    req = urllib.request.Request(url, headers={"User-Agent": "naga-discord-bot"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            content = resp.read(max_bytes + 1)
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return None
+    return content if len(content) <= max_bytes else None
+
+
+def _send_file_upload(upload_id: str, filename: str, content_type: str, content: bytes) -> None:
+    """Étape 2 de l'envoi : le fichier lui-même, en multipart (hors JSON)."""
+    boundary = uuid.uuid4().hex
+    req = urllib.request.Request(
+        f"{BASE_URL}/file_uploads/{upload_id}/send",
+        data=_multipart_body(filename, content_type, content, boundary),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {NOTION_TOKEN}",
+            "Notion-Version": NOTION_VERSION,
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+
+    def _send():
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read())
+
+    notion_rate.call_with_retry(_send, "POST file_upload")
+
+
+def _upload_attachment(piece: dict):
+    """Téléverse une pièce jointe Discord dans Notion. Retourne l'entrée « files » ou None."""
+    size = piece.get("size")
+    if size and size > MAX_UPLOAD_BYTES:
+        return None
+    content = _download_discord_attachment(piece.get("url"), MAX_UPLOAD_BYTES)
+    if content is None:
+        return None
+    filename = _attachment_name(piece)
+    content_type = (piece.get("content_type") or "application/octet-stream").split(";", 1)[0].strip()
+    created = _request("POST", "/file_uploads", {"filename": filename, "content_type": content_type})
+    _send_file_upload(created["id"], filename, content_type, content)
+    # À attacher dans l'heure, sinon Notion expire l'envoi : c'est fait juste après.
+    return {"type": "file_upload", "file_upload": {"id": created["id"]}, "name": filename}
+
+
+def _write_attachments(page_id: str, pieces: list, thread_id=None) -> None:
+    """Écrit « Pièces jointes » dans un appel à part, sans jamais faire échouer le push.
+
+    Chaque fichier est téléversé ; à défaut, lien vers le message Discord. Si
+    Notion refuse l'écriture avec des fichiers téléversés, on réessaie avec les
+    seuls liens de repli.
+    """
+    pieces = [_piece(p) for p in pieces][:NOTION_FILES_LIMIT]
+    entries, uploaded = [], 0
+    for piece in pieces:
+        try:
+            entry = _upload_attachment(piece)
+        except Exception:  # noqa: BLE001 — une pièce ratée ne doit pas bloquer les autres
+            entry = None
+        if entry is not None:
+            uploaded += 1
+        entries.append(entry or _fallback_entry(piece))
+
+    def _patch(files):
+        _request("PATCH", f"/pages/{page_id}", {"properties": {ATTACHMENTS_PROP: {"files": files}}})
+
+    try:
+        _patch(entries)
+    except urllib.error.URLError:
+        try:
+            if not uploaded:
+                raise
+            _patch([_fallback_entry(p) for p in pieces])
+            uploaded = 0
+        except urllib.error.URLError:
+            print(f"Pièces jointes non écrites (thread {thread_id}).")
+            return
+    print(f"Pièces jointes (thread {thread_id}) : {uploaded} téléversée(s), "
+          f"{len(pieces) - uploaded} en lien vers le message Discord.")
+
+
 def _update_patch(properties: dict, existing_props: dict, only_empty: bool = False) -> dict:
     """Propriétés à écrire sur une page existante.
 
@@ -311,11 +474,10 @@ def _build_properties(data: dict, title_prop: str = None) -> dict:
     if data.get("liens"):
         props["Liens"] = _rich_text(data["liens"])
     if data.get("pieces_jointes"):
-        props["Pièces jointes"] = {
-            "files": [
-                {"name": url.split("/")[-1][:100], "external": {"url": url}}
-                for url in data["pieces_jointes"]
-            ]
+        # Forme de repli (liens) ; push_to_notion écrit la colonne à part, avec
+        # les fichiers téléversés (voir _write_attachments).
+        props[ATTACHMENTS_PROP] = {
+            "files": [_fallback_entry(_piece(p)) for p in data["pieces_jointes"]][:NOTION_FILES_LIMIT]
         }
     if data.get("thread_id"):
         props["Thread ID"] = _rich_text(str(data["thread_id"]))
@@ -415,6 +577,10 @@ def push_to_notion(data: dict) -> dict:
         page_id = result["results"][0]["id"] if result["results"] else None
 
     properties = _build_properties(data, _TITLE_PROP)
+    # Pièces jointes écrites à part, après téléversement : un échec d'envoi ne
+    # doit pas faire rejeter le reste du push.
+    has_pieces = properties.pop(ATTACHMENTS_PROP, None) is not None
+    thread_id = data.get("thread_id")
 
     if page_id is not None:
         existing_props = _request("GET", f"/pages/{page_id}").get("properties", {})
@@ -427,6 +593,8 @@ def push_to_notion(data: dict) -> dict:
             _request("PATCH", f"/pages/{page_id}", {"properties": patch})
         if body_changed:
             _sync_conversation_body(page_id, messages_list)
+        if has_pieces and _attachments_writable(existing_props.get(ATTACHMENTS_PROP, {})):
+            _write_attachments(page_id, data["pieces_jointes"], thread_id)
         return {"action": "adopted" if adopted else "updated", "id": page_id}
     else:
         if full_text:
@@ -437,6 +605,8 @@ def push_to_notion(data: dict) -> dict:
         })
         if full_text:
             _sync_conversation_body(page["id"], messages_list)
+        if has_pieces:
+            _write_attachments(page["id"], data["pieces_jointes"], thread_id)
         return {"action": "created", "id": page["id"]}
 
 

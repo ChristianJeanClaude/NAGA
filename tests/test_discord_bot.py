@@ -142,7 +142,7 @@ def test_build_lead_payload_complet():
         "messages_full": "Premier message\n\nDeuxième message",
         "messages_list": ["Premier message", "Deuxième message"],
         "liens": "",
-        "pieces_jointes": ["https://cdn.discord/a.png"],
+        "pieces_jointes": [{"url": "https://cdn.discord/a.png"}],
         "steam_url": "https://store.steampowered.com/app/1",
         "kickstarter": "https://kickstarter.com/x",
     }
@@ -171,7 +171,7 @@ def test_build_lead_payload_dedup_liens_et_pieces():
     # https://a (premier https inconnu) → site_officiel ; https://b → liens
     assert payload["website_studio"] == "https://a"
     assert payload["liens"] == "https://b"
-    assert payload["pieces_jointes"] == ["https://p"]
+    assert payload["pieces_jointes"] == [{"url": "https://p"}]
 
 
 def test_build_lead_payload_listes_multiples():
@@ -987,3 +987,40 @@ def test_summary_due_ancien():
 
 def test_summary_due_date_illisible():
     assert discord_bot.summary_due("pas une date", _TODAY) is True
+
+
+# --- pièces jointes (dict + lien permanent du message) ------------------------
+
+_CDN = "https://cdn.discordapp.com/attachments/1/2/deck.pdf"
+
+
+def test_dedup_pieces_ignore_la_signature_du_cdn():
+    pieces = [
+        {"url": _CDN + "?ex=1&is=2&hm=3", "filename": "deck.pdf"},
+        {"url": _CDN + "?ex=9&is=9&hm=9", "filename": "deck.pdf"},
+        "https://cdn.discordapp.com/attachments/1/3/img.png",
+    ]
+    result = discord_bot.dedup_pieces(pieces)
+    assert [p["url"] for p in result] == [_CDN + "?ex=1&is=2&hm=3", "https://cdn.discordapp.com/attachments/1/3/img.png"]
+
+
+def test_build_message_record_jump_url():
+    msg = _fake_message()
+    msg.jump_url = "https://discord.com/channels/1/2/999"
+    assert discord_bot.build_message_record(msg)["jump_url"] == "https://discord.com/channels/1/2/999"
+
+
+def test_build_message_record_sans_jump_url():
+    assert discord_bot.build_message_record(_fake_message())["jump_url"] is None
+
+
+def test_accumulate_lead_piece_avec_metadonnees_et_lien_du_message():
+    bot = _bare_bot()
+    rec = _msg("m1")
+    rec["jump_url"] = "https://discord.com/channels/1/2/3"
+    rec["attachments"] = [{"filename": "deck.pdf", "url": _CDN, "content_type": "application/pdf", "size": 10}]
+    bot._accumulate_lead(1, "T", rec)
+    assert bot._thread_leads[1]["pieces"] == [{
+        "url": _CDN, "filename": "deck.pdf", "content_type": "application/pdf",
+        "size": 10, "jump_url": "https://discord.com/channels/1/2/3",
+    }]
