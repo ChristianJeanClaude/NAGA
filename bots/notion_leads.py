@@ -10,7 +10,11 @@ import hashlib
 import json
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
+
+import notion_rate
 
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN_LEADS", "")
 # Id de la base Leads : configurable via NOTION_DB_LEADS_ID (~/.env.notion),
@@ -21,6 +25,8 @@ BASE_URL = "https://api.notion.com/v1"
 
 
 def _request(method: str, path: str, body: dict | None = None) -> dict:
+    """Appel JSON à l'API Notion, sous le throttle partagé et avec nouvel essai
+    sur 429 / 5xx (voir notion_rate)."""
     url = f"{BASE_URL}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
@@ -33,16 +39,22 @@ def _request(method: str, path: str, body: dict | None = None) -> dict:
             "Content-Type": "application/json",
         },
     )
-    try:
-        with urllib.request.urlopen(req) as resp:
+
+    def _send():
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
+
+    try:
+        return notion_rate.call_with_retry(_send, method)
     except urllib.error.HTTPError as e:
         body = e.read().decode()
+        # Les messages d'erreur Notion citent souvent l'id de la page : masqué.
         try:
             notion_error = json.loads(body)
-            print(f"Erreur Notion {e.code} : {notion_error.get('code')} — {notion_error.get('message')}")
+            message = notion_rate.redact_ids(notion_error.get("message"))
+            print(f"Erreur Notion {e.code} : {notion_error.get('code')} — {message}")
         except json.JSONDecodeError:
-            print(f"Erreur HTTP {e.code} : {body}")
+            print(f"Erreur HTTP {e.code} : {notion_rate.redact_ids(body)}")
         raise
 
 
@@ -119,9 +131,27 @@ def _truncate_utf16(content: str, limit: int) -> str:
     return encoded[: limit * 2].decode("utf-16-le", errors="ignore")
 
 
+def _tail_utf16(content: str, limit: int) -> str:
+    """Garde la FIN de ``content`` : ses ``limit`` dernières unités UTF-16.
+
+    Pendant de _truncate_utf16 pour la colonne Messages, où ce sont les
+    échanges les plus récents qui comptent. Une demi-paire de substitution en
+    tête de coupe est jetée.
+    """
+    encoded = content.encode("utf-16-le")
+    if len(encoded) <= limit * 2:
+        return content
+    return encoded[-limit * 2:].decode("utf-16-le", errors="ignore")
+
+
 def _rich_text(content: str) -> dict:
     """Construit une propriété rich_text en tronquant à la limite Notion (2000 unités UTF-16)."""
     return {"rich_text": [{"text": {"content": _truncate_utf16(content, NOTION_RICH_TEXT_LIMIT)}}]}
+
+
+def _rich_text_tail(content: str) -> dict:
+    """Propriété rich_text qui garde la fin du texte (colonne Messages)."""
+    return {"rich_text": [{"text": {"content": _tail_utf16(content, NOTION_RICH_TEXT_LIMIT)}}]}
 
 
 def _prop_text(prop: dict) -> str:
@@ -220,11 +250,232 @@ def _is_empty(prop: dict) -> bool:
     ptype = prop.get("type")
     if ptype in ("rich_text", "title", "files"):
         return not prop.get(ptype)
-    if ptype in ("date", "url", "number", "select"):
+    if ptype in ("date", "url", "number", "select", "email"):
         return prop.get(ptype) is None
     if ptype == "multi_select":
         return not prop.get("multi_select")
     return False
+
+
+# --- Pièces jointes : téléversement dans Notion ------------------------------
+#
+# Les URLs cdn.discordapp.com sont signées (ex=/is=/hm=) et expirent : la
+# colonne « Pièces jointes » finissait en liste de liens morts. Le bot
+# télécharge donc le fichier depuis Discord (URL fraîche, obtenue au scrape)
+# et le téléverse dans Notion (File Upload API, envoi en une partie). Repli si
+# le fichier est trop lourd, d'un type refusé par Notion, ou si l'envoi
+# échoue : lien PERMANENT vers le message Discord qui porte la pièce jointe.
+
+ATTACHMENTS_PROP = "Pièces jointes"
+# Envoi en une partie : 20 Mo max côté Notion (5 Mio sur un workspace gratuit,
+# auquel cas Notion refuse l'envoi et le repli s'applique).
+MAX_UPLOAD_BYTES = 20 * 1024 * 1024
+# Notion refuse plus de 100 éléments dans un tableau de propriété.
+NOTION_FILES_LIMIT = 100
+DISCORD_CDN_HOSTS = ("cdn.discordapp.com", "media.discordapp.net")
+
+
+def _is_discord_cdn(url: str) -> bool:
+    return urllib.parse.urlparse(url or "").hostname in DISCORD_CDN_HOSTS
+
+
+def _filename_from_url(url: str) -> str:
+    """Nom du fichier d'après le chemin de l'URL, sans la query de signature."""
+    return urllib.parse.unquote(urllib.parse.urlparse(url or "").path.rsplit("/", 1)[-1]) or "fichier"
+
+
+def _piece(piece) -> dict:
+    """Une pièce jointe sous forme de dict, qu'on reçoive une URL nue ou un dict."""
+    return dict(piece) if isinstance(piece, dict) else {"url": piece}
+
+
+def _attachment_name(piece: dict) -> str:
+    return (piece.get("filename") or _filename_from_url(piece.get("url")))[:100]
+
+
+def _fallback_entry(piece: dict) -> dict:
+    """Entrée « lien externe » : le message Discord (permanent) plutôt que le CDN (expire)."""
+    link = piece.get("jump_url") or piece.get("url")
+    return {"name": _attachment_name(piece), "external": {"url": link}}
+
+
+def _attachments_stale(prop: dict) -> bool:
+    """Vrai si la colonne ne contient que des liens CDN Discord écrits par l'ancien bot.
+
+    Ces liens expirent : la colonne est alors réécrite (une fois), avec des
+    fichiers téléversés. Un fichier ajouté à la main (type « file ») ou un lien
+    vers un message Discord n'est jamais remplacé.
+    """
+    files = prop.get("files") or []
+    return bool(files) and all(
+        f.get("type") == "external" and _is_discord_cdn((f.get("external") or {}).get("url"))
+        for f in files
+    )
+
+
+def _attachments_writable(prop: dict) -> bool:
+    """La colonne peut être (ré)écrite : vide, ou seulement des liens CDN périmés."""
+    return _is_empty(prop) or _attachments_stale(prop)
+
+
+def _multipart_body(filename: str, content_type: str, content: bytes, boundary: str) -> bytes:
+    """Corps multipart/form-data du champ « file » attendu par Notion."""
+    safe_name = filename.replace('"', "'").replace("\r", " ").replace("\n", " ")
+    head = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="{safe_name}"\r\n'
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode("utf-8")
+    return head + content + f"\r\n--{boundary}--\r\n".encode("ascii")
+
+
+def _download_discord_attachment(url: str, max_bytes: int):
+    """Contenu d'une pièce jointe du CDN Discord, ou None (trop lourde, inaccessible).
+
+    Seuls les hôtes du CDN Discord sont téléchargés : jamais une URL arbitraire.
+    """
+    if not _is_discord_cdn(url):
+        return None
+    req = urllib.request.Request(url, headers={"User-Agent": "naga-discord-bot"})
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            content = resp.read(max_bytes + 1)
+    except (urllib.error.URLError, TimeoutError, ValueError):
+        return None
+    return content if len(content) <= max_bytes else None
+
+
+def _send_file_upload(upload_id: str, filename: str, content_type: str, content: bytes) -> None:
+    """Étape 2 de l'envoi : le fichier lui-même, en multipart (hors JSON)."""
+    boundary = uuid.uuid4().hex
+    req = urllib.request.Request(
+        f"{BASE_URL}/file_uploads/{upload_id}/send",
+        data=_multipart_body(filename, content_type, content, boundary),
+        method="POST",
+        headers={
+            "Authorization": f"Bearer {NOTION_TOKEN}",
+            "Notion-Version": NOTION_VERSION,
+            "Content-Type": f"multipart/form-data; boundary={boundary}",
+        },
+    )
+
+    def _send():
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            return json.loads(resp.read())
+
+    notion_rate.call_with_retry(_send, "POST file_upload")
+
+
+def _upload_attachment(piece: dict):
+    """Téléverse une pièce jointe Discord dans Notion. Retourne l'entrée « files » ou None."""
+    size = piece.get("size")
+    if size and size > MAX_UPLOAD_BYTES:
+        return None
+    content = _download_discord_attachment(piece.get("url"), MAX_UPLOAD_BYTES)
+    if content is None:
+        return None
+    filename = _attachment_name(piece)
+    content_type = (piece.get("content_type") or "application/octet-stream").split(";", 1)[0].strip()
+    created = _request("POST", "/file_uploads", {"filename": filename, "content_type": content_type})
+    _send_file_upload(created["id"], filename, content_type, content)
+    # À attacher dans l'heure, sinon Notion expire l'envoi : c'est fait juste après.
+    return {"type": "file_upload", "file_upload": {"id": created["id"]}, "name": filename}
+
+
+def _write_attachments(page_id: str, pieces: list, thread_id=None) -> None:
+    """Écrit « Pièces jointes » dans un appel à part, sans jamais faire échouer le push.
+
+    Chaque fichier est téléversé ; à défaut, lien vers le message Discord. Si
+    Notion refuse l'écriture avec des fichiers téléversés, on réessaie avec les
+    seuls liens de repli.
+    """
+    pieces = [_piece(p) for p in pieces][:NOTION_FILES_LIMIT]
+    entries, uploaded = [], 0
+    for piece in pieces:
+        try:
+            entry = _upload_attachment(piece)
+        except Exception:  # noqa: BLE001 — une pièce ratée ne doit pas bloquer les autres
+            entry = None
+        if entry is not None:
+            uploaded += 1
+        entries.append(entry or _fallback_entry(piece))
+
+    def _patch(files):
+        _request("PATCH", f"/pages/{page_id}", {"properties": {ATTACHMENTS_PROP: {"files": files}}})
+
+    try:
+        _patch(entries)
+    except urllib.error.URLError:
+        try:
+            if not uploaded:
+                raise
+            _patch([_fallback_entry(p) for p in pieces])
+            uploaded = 0
+        except urllib.error.URLError:
+            print(f"Pièces jointes non écrites (thread {thread_id}).")
+            return
+    print(f"Pièces jointes (thread {thread_id}) : {uploaded} téléversée(s), "
+          f"{len(pieces) - uploaded} en lien vers le message Discord.")
+
+
+def _update_patch(properties: dict, existing_props: dict, only_empty: bool = False) -> dict:
+    """Propriétés à écrire sur une page existante.
+
+    Les champs de ALWAYS_UPDATE sont toujours réécrits ; les autres seulement si
+    la colonne est vide côté Notion (ex. Email : une adresse saisie à la main
+    n'est jamais écrasée par celle trouvée dans le fil). ``only_empty`` (fiche
+    manuelle adoptée) ne remplit que les colonnes vides, ALWAYS_UPDATE compris.
+    """
+    return {
+        name: value
+        for name, value in properties.items()
+        if (name in ALWAYS_UPDATE and not only_empty) or _is_empty(existing_props.get(name, {}))
+    }
+
+
+def _normalize_title(title: str) -> str:
+    """Titre comparable : sans casse ni espaces (« Battle Only » == « battleonly »)."""
+    return "".join((title or "").split()).casefold()
+
+
+def _page_title(page: dict) -> str:
+    """Texte brut de la propriété titre d'une page (quel que soit son nom)."""
+    for prop in page.get("properties", {}).values():
+        if prop.get("type") == "title":
+            return "".join(t.get("plain_text", "") for t in prop.get("title", []))
+    return ""
+
+
+def _pick_adoptable(pages: list, title: str):
+    """Id de l'unique page dont le titre correspond à ``title``, sinon None.
+
+    Plusieurs homonymes : on ne devine pas, le bot crée sa propre fiche.
+    """
+    wanted = _normalize_title(title)
+    matches = [p["id"] for p in pages if _normalize_title(_page_title(p)) == wanted]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _find_adoptable_page(title: str):
+    """Fiche créée à la main (Thread ID vide) portant le même titre que le fil.
+
+    Notion ne filtre pas un titre sans casse ni espaces : on liste les fiches
+    sans Thread ID et on compare côté Python.
+    """
+    pages, cursor = [], None
+    while True:
+        query = {
+            "filter": {"property": "Thread ID", "rich_text": {"is_empty": True}},
+            "page_size": 100,
+        }
+        if cursor:
+            query["start_cursor"] = cursor
+        r = _request("POST", f"/databases/{DB_ID}/query", query)
+        pages.extend(r.get("results", []))
+        if not r.get("has_more"):
+            break
+        cursor = r.get("next_cursor")
+    return _pick_adoptable(pages, title)
 
 
 def _build_properties(data: dict, title_prop: str = None) -> dict:
@@ -237,15 +488,15 @@ def _build_properties(data: dict, title_prop: str = None) -> dict:
     if data.get("date"):
         props["Dernier échange"] = {"date": {"start": data["date"]}}
     if data.get("messages"):
-        props["Messages"] = _rich_text(data["messages"])
+        # Aperçu : la FIN de la conversation (échanges récents), pas le début.
+        props["Messages"] = _rich_text_tail(data["messages"])
     if data.get("liens"):
         props["Liens"] = _rich_text(data["liens"])
     if data.get("pieces_jointes"):
-        props["Pièces jointes"] = {
-            "files": [
-                {"name": url.split("/")[-1][:100], "external": {"url": url}}
-                for url in data["pieces_jointes"]
-            ]
+        # Forme de repli (liens) ; push_to_notion écrit la colonne à part, avec
+        # les fichiers téléversés (voir _write_attachments).
+        props[ATTACHMENTS_PROP] = {
+            "files": [_fallback_entry(_piece(p)) for p in data["pieces_jointes"]][:NOTION_FILES_LIMIT]
         }
     if data.get("thread_id"):
         props["Thread ID"] = _rich_text(str(data["thread_id"]))
@@ -310,7 +561,11 @@ def push_to_notion(data: dict) -> dict:
     La conversation intégrale (``messages_full``) est écrite dans le CORPS de la
     page (blocs), sans coupure ; la propriété ``Messages`` n'en garde qu'un aperçu.
 
-    Retourne {"action": "created"|"updated", "id": "<page_id>"}.
+    Si aucune page ne porte ce Thread ID mais qu'une seule fiche créée à la main
+    (Thread ID vide) a le même titre, elle est adoptée : le bot y écrit le
+    Thread ID et ne remplit que les colonnes vides, au lieu de créer un doublon.
+
+    Retourne {"action": "created"|"updated"|"adopted", "id": "<page_id>"}.
     """
     # Conversation intégrale destinée au corps de page (repli sur l'aperçu).
     full_text = data.get("messages_full") or data.get("messages") or ""
@@ -319,6 +574,7 @@ def push_to_notion(data: dict) -> dict:
         messages_list = [full_text] if full_text else []
     sig = _conv_sig(full_text) if full_text else ""
 
+    adopted = False
     if data.get("thread_id"):
         result = _request("POST", f"/databases/{DB_ID}/query", {
             "filter": {
@@ -326,6 +582,10 @@ def push_to_notion(data: dict) -> dict:
                 "rich_text": {"equals": str(data["thread_id"])},
             }
         })
+        page_id = result["results"][0]["id"] if result["results"] else None
+        if page_id is None:
+            page_id = _find_adoptable_page(data["nom_du_jeu"])
+            adopted = page_id is not None
     else:
         result = _request("POST", f"/databases/{DB_ID}/query", {
             "filter": {
@@ -333,26 +593,28 @@ def push_to_notion(data: dict) -> dict:
                 "title": {"equals": data["nom_du_jeu"]},
             }
         })
+        page_id = result["results"][0]["id"] if result["results"] else None
 
     properties = _build_properties(data, _TITLE_PROP)
+    # Pièces jointes écrites à part, après téléversement : un échec d'envoi ne
+    # doit pas faire rejeter le reste du push.
+    has_pieces = properties.pop(ATTACHMENTS_PROP, None) is not None
+    thread_id = data.get("thread_id")
 
-    if result["results"]:
-        page_id = result["results"][0]["id"]
+    if page_id is not None:
         existing_props = _request("GET", f"/pages/{page_id}").get("properties", {})
         # Corps à réécrire seulement si la conversation a changé (empreinte).
         body_changed = bool(full_text) and _prop_text(existing_props.get("Conv sync")) != sig
-        patch = {
-            name: value
-            for name, value in properties.items()
-            if name in ALWAYS_UPDATE or _is_empty(existing_props.get(name, {}))
-        }
+        patch = _update_patch(properties, existing_props, only_empty=adopted)
         if body_changed:
             patch["Conv sync"] = _rich_text(sig)
         if patch:
             _request("PATCH", f"/pages/{page_id}", {"properties": patch})
         if body_changed:
             _sync_conversation_body(page_id, messages_list)
-        return {"action": "updated", "id": page_id}
+        if has_pieces and _attachments_writable(existing_props.get(ATTACHMENTS_PROP, {})):
+            _write_attachments(page_id, data["pieces_jointes"], thread_id)
+        return {"action": "adopted" if adopted else "updated", "id": page_id}
     else:
         if full_text:
             properties["Conv sync"] = _rich_text(sig)
@@ -362,6 +624,8 @@ def push_to_notion(data: dict) -> dict:
         })
         if full_text:
             _sync_conversation_body(page["id"], messages_list)
+        if has_pieces:
+            _write_attachments(page["id"], data["pieces_jointes"], thread_id)
         return {"action": "created", "id": page["id"]}
 
 
@@ -424,10 +688,20 @@ def trigger_ai_summary(page_id: str, messages_text: str, date_str: str) -> None:
     Notion IA recalcule Summary automatiquement quand sa source (Messages) change.
     Stamp Dernier résumé dans le même appel pour tracker la dernière régénération.
     """
-    _request("PATCH", f"/pages/{page_id}", {"properties": {
-        "Messages": _rich_text(messages_text),
+    _request("PATCH", f"/pages/{page_id}", {"properties": _summary_trigger_properties(messages_text, date_str)})
+
+
+def _summary_trigger_properties(messages_text: str, date_str: str) -> dict:
+    """Propriétés écrites par trigger_ai_summary.
+
+    Messages garde la FIN de la conversation, comme au push : _rich_text
+    coupait par le début, si bien que sur les fils longs la colonne montrait
+    les 2000 premiers caractères et s'arrêtait en plein mot.
+    """
+    return {
+        "Messages": _rich_text_tail(messages_text),
         "Dernier résumé": {"date": {"start": date_str}},
-    }})
+    }
 
 
 if __name__ == "__main__":

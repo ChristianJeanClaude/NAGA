@@ -15,12 +15,14 @@ Au démarrage le bot parcourt tout l'historique du channel (threads actifs + arc
 bots/
   discord_bot.py      — bot principal : scraping, parsing, upsert Notion
   notion_leads.py     — client Notion pour la base Leads (module indépendant)
+  notion_rate.py      — throttle Notion partagé (~3 req/s) + nouvel essai sur 429 / 5xx
 tools/
   list_forum_threads.py     — diagnostic : liste les threads du forum cible
   inspect_leads_db.py       — diagnostic : affiche le schéma de la base Leads (lecture seule)
   migrate_notion_format.py  — migration ponctuelle : marqueurs → propriété Message IDs
 tests/
   test_discord_bot.py — tests des fonctions pures (aucun appel réseau)
+  test_notion_leads.py, test_notion_rate.py — idem pour les modules Notion
 conftest.py           — ajoute bots/ au sys.path pour les imports de test
 ```
 

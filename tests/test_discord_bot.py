@@ -5,6 +5,9 @@ on ne teste que l'extraction de liens, le parsing de slug Steam et la constructi
 du record JSON à partir d'un faux message (stub).
 """
 
+import asyncio
+import threading
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -139,7 +142,7 @@ def test_build_lead_payload_complet():
         "messages_full": "Premier message\n\nDeuxième message",
         "messages_list": ["Premier message", "Deuxième message"],
         "liens": "",
-        "pieces_jointes": ["https://cdn.discord/a.png"],
+        "pieces_jointes": [{"url": "https://cdn.discord/a.png"}],
         "steam_url": "https://store.steampowered.com/app/1",
         "kickstarter": "https://kickstarter.com/x",
     }
@@ -168,7 +171,7 @@ def test_build_lead_payload_dedup_liens_et_pieces():
     # https://a (premier https inconnu) → site_officiel ; https://b → liens
     assert payload["website_studio"] == "https://a"
     assert payload["liens"] == "https://b"
-    assert payload["pieces_jointes"] == ["https://p"]
+    assert payload["pieces_jointes"] == [{"url": "https://p"}]
 
 
 def test_build_lead_payload_listes_multiples():
@@ -728,7 +731,11 @@ def _bare_bot(push_lead=None):
     bot = discord_bot.NagaScraperBot.__new__(discord_bot.NagaScraperBot)
     bot._thread_leads = {}
     bot._lead_page_ids = {}
+    bot._push_locks = {}
     bot._push_lead = push_lead
+    bot._initial_sync_started = False
+    bot._initial_sync_lock = asyncio.Lock()
+    bot._connection = SimpleNamespace(user="Naga Scout Bot#0001")  # pour bot.user
     return bot
 
 
@@ -752,8 +759,12 @@ def test_push_thread_lead_pas_de_double_push_si_inchange():
     calls = []
     bot = _bare_bot(push_lead=lambda data: calls.append(data) or {"id": "p1"})
     bot._accumulate_lead(1, "T", _msg("m1"))
-    bot._push_thread_lead(1)
-    bot._push_thread_lead(1)  # rien n'a changé → pas de second appel
+
+    async def scenario():
+        await bot._push_thread_lead(1)
+        await bot._push_thread_lead(1)  # rien n'a changé → pas de second appel
+
+    asyncio.run(scenario())
     assert len(calls) == 1
 
 
@@ -761,10 +772,57 @@ def test_push_thread_lead_repousse_si_nouveau_message():
     calls = []
     bot = _bare_bot(push_lead=lambda data: calls.append(data) or {"id": "p1"})
     bot._accumulate_lead(1, "T", _msg("m1"))
-    bot._push_thread_lead(1)
-    bot._accumulate_lead(1, "T", _msg("m2", "autre"))  # nouveau message
-    bot._push_thread_lead(1)
+
+    async def scenario():
+        await bot._push_thread_lead(1)
+        bot._accumulate_lead(1, "T", _msg("m2", "autre"))  # nouveau message
+        await bot._push_thread_lead(1)
+
+    asyncio.run(scenario())
     assert len(calls) == 2
+
+
+def test_push_thread_lead_hors_de_la_boucle_asyncio():
+    # Le push Notion (bloquant) ne doit jamais tourner dans le thread de la boucle.
+    threads = []
+    bot = _bare_bot(push_lead=lambda data: threads.append(threading.current_thread()) or {"id": "p1"})
+    bot._accumulate_lead(1, "T", _msg("m1"))
+    asyncio.run(bot._push_thread_lead(1))
+    assert threads and threads[0] is not threading.main_thread()
+
+
+def test_push_thread_lead_concurrents_un_seul_push():
+    # on_thread_create et on_message simultanés sur un même fil : un seul push,
+    # jamais deux en parallèle (sinon deux pages créées).
+    calls, active, overlap = [], [0], []
+
+    def slow_push(data):
+        active[0] += 1
+        overlap.append(active[0])
+        time.sleep(0.05)
+        active[0] -= 1
+        calls.append(data)
+        return {"id": "p1"}
+
+    bot = _bare_bot(push_lead=slow_push)
+    bot._accumulate_lead(1, "T", _msg("m1"))
+
+    async def scenario():
+        await asyncio.gather(bot._push_thread_lead(1), bot._push_thread_lead(1))
+
+    asyncio.run(scenario())
+    assert len(calls) == 1
+    assert max(overlap) == 1
+
+
+def test_push_thread_lead_echec_isole():
+    def failing_push(data):
+        raise RuntimeError("HTTP Error 429: Too Many Requests")
+
+    bot = _bare_bot(push_lead=failing_push)
+    bot._accumulate_lead(1, "T", _msg("m1"))
+    asyncio.run(bot._push_thread_lead(1))  # ne lève pas
+    assert "_pushed_sig" not in bot._thread_leads[1]  # retenté au prochain événement
 
 
 # --- messages postés par webhook (skill naga-sync-echanges) -------------------
@@ -805,3 +863,212 @@ def test_clean_message_text_webhook_supprime_quand_meme_les_urls():
     text = "Deck: https://docs.google.com/presentation/d/abc"
     result = discord_bot.clean_message_text(text, "Échanges email", _TS, keep_previews=True)
     assert "https://" not in result
+
+
+# --- email du studio (extract_external_email) --------------------------------
+
+def test_extract_external_email_signature():
+    text = ("Je suis retourné sur le stand\n\nJane Doe\nCo-Founder @ Studio Exemple\n"
+            " jane.dev@example.com\n +00 000 000 000")
+    assert discord_bot.extract_external_email(text) == "jane.dev@example.com"
+
+
+def test_extract_external_email_apres_emoji():
+    assert discord_bot.extract_external_email("📧 studio.contact@example.com") == "studio.contact@example.com"
+
+
+def test_extract_external_email_ignore_naga_et_prend_la_suivante():
+    text = "Copie à ewan@naga-agency.com, contact studio : dev@studio.io."
+    assert discord_bot.extract_external_email(text) == "dev@studio.io"
+
+
+def test_extract_external_email_ignore_discord():
+    assert discord_bot.extract_external_email("noreply@discord.com") is None
+    assert discord_bot.extract_external_email("x@mail.discordapp.com") is None
+
+
+def test_extract_external_email_ignore_les_urls():
+    text = "Logo : https://cdn.example.com/img/logo@2x.png"
+    assert discord_bot.extract_external_email(text) is None
+
+
+def test_extract_external_email_aucune():
+    assert discord_bot.extract_external_email("Pas d'adresse ici @ demain") is None
+    assert discord_bot.extract_external_email("") is None
+    assert discord_bot.extract_external_email(None) is None
+
+
+def test_build_lead_payload_email_depuis_raw_text():
+    raw = "Super jeu\n\n📧 studio.contact@example.com\nhttps://store.steampowered.com/app/1"
+    payload = discord_bot.build_lead_payload("Kiryon", ["m"], [], [], "2026-06-01", raw_text=raw)
+    assert payload["email"] == "studio.contact@example.com"
+
+
+def test_build_lead_payload_sans_email():
+    payload = discord_bot.build_lead_payload("Jeu", ["m"], [], [], "2026-06-01", raw_text="rien")
+    assert "email" not in payload
+
+
+# --- reconnexions gateway : un seul scrape complet par processus --------------
+
+def _sync_bot(order, scrape_ok=True):
+    """Bot nu dont le scrape et les résumés IA sont remplacés par des stubs."""
+    bot = _bare_bot()
+
+    async def fake_scrape():
+        order.append("scrape")
+        await asyncio.sleep(0.01)  # laisse une reconnexion arriver pendant le scrape
+        return scrape_ok
+
+    async def fake_refresh():
+        order.append("refresh")
+
+    bot._scrape_history = fake_scrape
+    bot._refresh_lead_summaries = fake_refresh
+    return bot
+
+
+def test_on_ready_reconnexion_pendant_le_scrape_ne_relance_rien():
+    order = []
+    bot = _sync_bot(order)
+
+    async def scenario():
+        await asyncio.gather(bot.on_ready(), bot.on_ready())
+
+    asyncio.run(scenario())
+    assert order == ["scrape", "refresh"]
+
+
+def test_on_ready_reconnexion_apres_le_scrape_ne_relance_rien(monkeypatch):
+    logs = []
+    monkeypatch.setattr(discord_bot, "log", logs.append)
+    order = []
+    bot = _sync_bot(order)
+
+    async def scenario():
+        await bot.on_ready()
+        await bot.on_ready()  # nouvelle session gateway, même processus
+
+    asyncio.run(scenario())
+    assert order == ["scrape", "refresh"]
+    assert any(line.startswith("Reconnexion") for line in logs)
+
+
+def test_on_ready_resumes_ia_apres_le_scrape_et_en_sequence():
+    order = []
+    asyncio.run(_sync_bot(order).on_ready())
+    assert order == ["scrape", "refresh"]
+
+
+def test_on_ready_pas_de_resumes_si_channel_inaccessible():
+    order = []
+    asyncio.run(_sync_bot(order, scrape_ok=False).on_ready())
+    assert order == ["scrape"]
+
+
+# --- summary_due -------------------------------------------------------------
+
+_TODAY = datetime(2026, 11, 24, tzinfo=timezone.utc).date()
+
+
+def test_summary_due_jamais_fait():
+    assert discord_bot.summary_due(None, _TODAY) is True
+    assert discord_bot.summary_due("", _TODAY) is True
+
+
+def test_summary_due_recent():
+    assert discord_bot.summary_due("2026-11-20", _TODAY) is False
+
+
+def test_summary_due_ancien():
+    assert discord_bot.summary_due("2026-11-10", _TODAY) is True  # 14 jours pile
+    assert discord_bot.summary_due("2026-11-10T09:00:00.000+00:00", _TODAY) is True
+
+
+def test_summary_due_date_illisible():
+    assert discord_bot.summary_due("pas une date", _TODAY) is True
+
+
+# --- pièces jointes (dict + lien permanent du message) ------------------------
+
+_CDN = "https://cdn.discordapp.com/attachments/1/2/deck.pdf"
+
+
+def test_dedup_pieces_ignore_la_signature_du_cdn():
+    pieces = [
+        {"url": _CDN + "?ex=1&is=2&hm=3", "filename": "deck.pdf"},
+        {"url": _CDN + "?ex=9&is=9&hm=9", "filename": "deck.pdf"},
+        "https://cdn.discordapp.com/attachments/1/3/img.png",
+    ]
+    result = discord_bot.dedup_pieces(pieces)
+    assert [p["url"] for p in result] == [_CDN + "?ex=1&is=2&hm=3", "https://cdn.discordapp.com/attachments/1/3/img.png"]
+
+
+def test_build_message_record_jump_url():
+    msg = _fake_message()
+    msg.jump_url = "https://discord.com/channels/1/2/999"
+    assert discord_bot.build_message_record(msg)["jump_url"] == "https://discord.com/channels/1/2/999"
+
+
+def test_build_message_record_sans_jump_url():
+    assert discord_bot.build_message_record(_fake_message())["jump_url"] is None
+
+
+def test_accumulate_lead_piece_avec_metadonnees_et_lien_du_message():
+    bot = _bare_bot()
+    rec = _msg("m1")
+    rec["jump_url"] = "https://discord.com/channels/1/2/3"
+    rec["attachments"] = [{"filename": "deck.pdf", "url": _CDN, "content_type": "application/pdf", "size": 10}]
+    bot._accumulate_lead(1, "T", rec)
+    assert bot._thread_leads[1]["pieces"] == [{
+        "url": _CDN, "filename": "deck.pdf", "content_type": "application/pdf",
+        "size": 10, "jump_url": "https://discord.com/channels/1/2/3",
+    }]
+
+
+# --- logs : jamais de contenu de message ---------------------------------------
+
+def test_process_message_ne_logge_pas_le_contenu(monkeypatch):
+    logs = []
+    monkeypatch.setattr(discord_bot, "log", logs.append)
+    bot = _bare_bot()
+    bot._channel_id = 1
+    bot._notion = None
+    msg = _fake_message()
+    msg.content = "Contact : dev@studio.io, tel +33 6 12 34 56 78"  # pas de lien Steam : aucun appel réseau
+    asyncio.run(bot.process_message(msg))
+    joined = "\n".join(logs)
+    assert "999" in joined
+    for secret in ("dev@studio.io", "+33", "Alice", "alice#0001", "screenshot.png"):
+        assert secret not in joined
+
+
+# --- Website studio : pas de plateforme tierce --------------------------------
+
+def test_sort_liens_linktree_va_dans_liens():
+    r = _sort(["https://linktr.ee/monstudio"])
+    assert r["website_studio"] is None
+    assert r["autres"] == ["https://linktr.ee/monstudio"]
+
+
+def test_sort_liens_itch_io_et_sous_domaine_vont_dans_liens():
+    r = _sort(["https://monstudio.itch.io/mon-jeu", "https://itch.io/profile/x"])
+    assert r["website_studio"] is None
+    assert r["autres"] == ["https://monstudio.itch.io/mon-jeu", "https://itch.io/profile/x"]
+
+
+def test_sort_liens_notion_site_va_dans_liens():
+    r = _sort(["https://presskit.notion.site/Mon-Jeu-abc"])
+    assert r["website_studio"] is None
+
+
+def test_sort_liens_vrai_site_apres_une_plateforme():
+    r = _sort(["https://linktr.ee/monstudio", "https://mon-studio.fr"])
+    assert r["website_studio"] == "https://mon-studio.fr"
+    assert r["autres"] == ["https://linktr.ee/monstudio"]
+
+
+def test_is_platform_link_pas_de_faux_positif_par_suffixe():
+    assert not discord_bot._is_platform_link("https://switch.io")          # ≠ itch.io
+    assert not discord_bot._is_platform_link("https://notnotion.so.studio.fr")
+    assert discord_bot._is_platform_link("https://www.reddit.com/r/indiegaming")

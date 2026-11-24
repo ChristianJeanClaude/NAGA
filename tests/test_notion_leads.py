@@ -271,3 +271,216 @@ def test_conv_sig_deterministe_et_sensible():
 
 def test_conv_sync_dans_managed_columns():
     assert "Conv sync" in notion_leads.MANAGED_COLUMNS
+
+
+# --- _update_patch : ce qui est réécrit sur une page existante ---------------
+
+def _email_prop(address):
+    return {"type": "email", "email": address}
+
+
+def test_email_absent_de_always_update():
+    assert "Email" not in notion_leads.ALWAYS_UPDATE
+
+
+def test_update_patch_email_existant_non_ecrase():
+    properties = notion_leads._build_properties({"nom_du_jeu": "J", "email": "bot@studio.io"})
+    patch = notion_leads._update_patch(properties, {"Email": _email_prop("humain@studio.io")})
+    assert "Email" not in patch
+
+
+def test_update_patch_email_vide_rempli():
+    properties = notion_leads._build_properties({"nom_du_jeu": "J", "email": "bot@studio.io"})
+    patch = notion_leads._update_patch(properties, {"Email": _email_prop(None)})
+    assert patch["Email"] == {"email": "bot@studio.io"}
+
+
+def test_update_patch_always_update_ecrase():
+    properties = notion_leads._build_properties({"nom_du_jeu": "J", "messages": "nouveau"})
+    existing = {"Messages": {"type": "rich_text", "rich_text": [{"plain_text": "ancien"}]}}
+    assert "Messages" in notion_leads._update_patch(properties, existing)
+
+
+# --- adoption des fiches créées à la main ------------------------------------
+
+def _page(page_id, title, title_prop="Jeu"):
+    return {"id": page_id, "properties": {
+        title_prop: {"type": "title", "title": [{"plain_text": title}]},
+        "Thread ID": {"type": "rich_text", "rich_text": []},
+    }}
+
+
+def test_normalize_title_casse_et_espaces():
+    assert notion_leads._normalize_title("Battle Only (Tatakau Dake)") == \
+        notion_leads._normalize_title("  battle  only(tatakau dake) ")
+    assert notion_leads._normalize_title(None) == ""
+
+
+def test_page_title_quel_que_soit_le_nom_de_la_propriete():
+    assert notion_leads._page_title(_page("p", "Absym", title_prop="Nom du jeu")) == "Absym"
+    assert notion_leads._page_title({"properties": {}}) == ""
+
+
+def test_pick_adoptable_fiche_manuelle_unique():
+    pages = [_page("manuelle", "Battle Only (Tatakau Dake)"), _page("autre", "Absym")]
+    assert notion_leads._pick_adoptable(pages, "battle only (tatakau dake)") == "manuelle"
+
+
+def test_pick_adoptable_homonymes_pas_d_adoption():
+    pages = [_page("a", "Absym"), _page("b", "ABSYM ")]
+    assert notion_leads._pick_adoptable(pages, "Absym") is None
+
+
+def test_pick_adoptable_aucune_correspondance():
+    assert notion_leads._pick_adoptable([_page("a", "Absym")], "Kiryon") is None
+    assert notion_leads._pick_adoptable([], "Kiryon") is None
+
+
+def test_update_patch_adoption_ne_remplit_que_les_vides():
+    properties = notion_leads._build_properties(
+        {"nom_du_jeu": "Battle Only (Tatakau Dake)", "thread_id": "1571", "messages": "fil",
+         "tags": ["Prio"], "studio": "Studio X"},
+        "Jeu",
+    )
+    existing = {
+        "Jeu": {"type": "title", "title": [{"plain_text": "Battle Only (Tatakau Dake)"}]},
+        "Thread ID": {"type": "rich_text", "rich_text": []},
+        "Messages": {"type": "rich_text", "rich_text": [{"plain_text": "note humaine"}]},
+        "Tags": {"type": "multi_select", "multi_select": [{"name": "CoPublish"}]},
+        "Studio": {"type": "rich_text", "rich_text": []},
+    }
+    patch = notion_leads._update_patch(properties, existing, only_empty=True)
+    assert set(patch) == {"Thread ID", "Studio"}  # titre, Messages, Tags humains intacts
+    assert patch["Thread ID"]["rich_text"][0]["text"]["content"] == "1571"
+
+
+
+# --- pièces jointes : téléversement et repli ---------------------------------
+
+_CDN = "https://cdn.discordapp.com/attachments/1/2/deck%20final.pdf?ex=6b01&is=6b00&hm=af01"
+_JUMP = "https://discord.com/channels/1/2/3"
+
+
+def test_is_discord_cdn():
+    assert notion_leads._is_discord_cdn(_CDN)
+    assert notion_leads._is_discord_cdn("https://media.discordapp.net/attachments/1/2/a.png")
+    assert not notion_leads._is_discord_cdn(_JUMP)
+    assert not notion_leads._is_discord_cdn("https://cdn.discordapp.com.evil.io/a.png")
+    assert not notion_leads._is_discord_cdn(None)
+
+
+def test_filename_from_url_sans_signature():
+    assert notion_leads._filename_from_url(_CDN) == "deck final.pdf"
+
+
+def test_fallback_entry_pointe_le_message_discord():
+    entry = notion_leads._fallback_entry({"url": _CDN, "filename": "deck.pdf", "jump_url": _JUMP})
+    assert entry == {"name": "deck.pdf", "external": {"url": _JUMP}}
+
+
+def test_fallback_entry_sans_lien_du_message_garde_l_url():
+    entry = notion_leads._fallback_entry({"url": _CDN})
+    assert entry == {"name": "deck final.pdf", "external": {"url": _CDN}}
+
+
+def test_build_properties_pieces_jointes_nom_sans_query():
+    props = notion_leads._build_properties({"nom_du_jeu": "J", "pieces_jointes": [_CDN]})
+    assert props["Pièces jointes"]["files"][0]["name"] == "deck final.pdf"
+
+
+def test_build_properties_pieces_jointes_limite_notion():
+    pieces = [f"https://cdn.discordapp.com/attachments/1/{i}/a.png" for i in range(150)]
+    props = notion_leads._build_properties({"nom_du_jeu": "J", "pieces_jointes": pieces})
+    assert len(props["Pièces jointes"]["files"]) == notion_leads.NOTION_FILES_LIMIT
+
+
+def _files_prop(*files):
+    return {"type": "files", "files": list(files)}
+
+
+def _external(url):
+    return {"name": "x", "type": "external", "external": {"url": url}}
+
+
+def test_attachments_stale_liens_cdn_seulement():
+    assert notion_leads._attachments_stale(_files_prop(_external(_CDN), _external(_CDN)))
+
+
+def test_attachments_stale_faux_si_fichier_televerse_ou_lien_message():
+    uploaded = {"name": "deck.pdf", "type": "file", "file": {"url": "https://prod-files.notion/x"}}
+    assert not notion_leads._attachments_stale(_files_prop(_external(_CDN), uploaded))
+    assert not notion_leads._attachments_stale(_files_prop(_external(_JUMP)))
+    assert not notion_leads._attachments_stale(_files_prop())
+
+
+def test_attachments_writable():
+    assert notion_leads._attachments_writable(_files_prop())                    # vide
+    assert notion_leads._attachments_writable(_files_prop(_external(_CDN)))     # liens morts
+    uploaded = {"name": "a", "type": "file", "file": {"url": "https://prod-files.notion/x"}}
+    assert not notion_leads._attachments_writable(_files_prop(uploaded))        # déjà téléversé
+
+
+def test_multipart_body_champ_file():
+    body = notion_leads._multipart_body('deck "v2".pdf', "application/pdf", b"%PDF-1.4", "XYZ")
+    assert body.startswith(b"--XYZ\r\n")
+    assert b'Content-Disposition: form-data; name="file"; filename="deck \'v2\'.pdf"' in body
+    assert b"Content-Type: application/pdf\r\n\r\n%PDF-1.4\r\n--XYZ--\r\n" in body
+
+
+def test_download_refuse_un_hote_hors_cdn_discord():
+    # Vérifié avant toute requête : aucun appel réseau.
+    assert notion_leads._download_discord_attachment("https://example.com/a.pdf", 10) is None
+
+
+def test_upload_attachment_trop_lourd_sans_telechargement():
+    piece = {"url": _CDN, "size": notion_leads.MAX_UPLOAD_BYTES + 1}
+    assert notion_leads._upload_attachment(piece) is None
+
+
+# --- colonne Messages : garder la FIN de la conversation ----------------------
+
+def _long_thread():
+    """Fil long façon Kiryon (1571824726165164173) : 60 messages numérotés."""
+    return "\n\n".join(f"[01/11/2026 10:{i:02d} - Dev] message numéro {i:02d}" for i in range(60))
+
+
+def test_tail_utf16_garde_la_fin():
+    assert notion_leads._tail_utf16("abcdef", 3) == "def"
+
+
+def test_tail_utf16_court_inchange():
+    assert notion_leads._tail_utf16("abc", 2000) == "abc"
+
+
+def test_tail_utf16_emoji_respecte_limite_et_jette_la_demi_paire():
+    s = "🧱" + "a" * 1999  # 2001 unités : la coupe tombe au milieu de l'emoji
+    tail = notion_leads._tail_utf16(s, 2000)
+    assert tail == "a" * 1999
+    assert _utf16_units(tail) <= 2000
+
+
+def test_build_properties_messages_garde_la_fin():
+    conversation = _long_thread()
+    props = notion_leads._build_properties({"nom_du_jeu": "Kiryon", "messages": conversation})
+    contenu = props["Messages"]["rich_text"][0]["text"]["content"]
+    assert contenu.endswith("message numéro 59")
+    assert "message numéro 00" not in contenu
+    assert _utf16_units(contenu) <= 2000
+
+
+def test_summary_trigger_properties_garde_la_fin():
+    # Régression : trigger_ai_summary écrivait les 2000 PREMIERS caractères.
+    props = notion_leads._summary_trigger_properties(_long_thread(), "2026-11-24")
+    contenu = props["Messages"]["rich_text"][0]["text"]["content"]
+    assert contenu.endswith("message numéro 59")
+    assert "message numéro 00" not in contenu
+    assert props["Dernier résumé"] == {"date": {"start": "2026-11-24"}}
+
+
+def test_summary_trigger_et_push_ecrivent_le_meme_apercu():
+    import discord_bot
+    messages = [f"[01/11/2026 10:{i:02d} - Dev] message numéro {i:02d} 🧱" for i in range(60)]
+    payload = discord_bot.build_lead_payload("Kiryon", messages, [], [], "2026-11-24")
+    via_push = notion_leads._build_properties(payload)["Messages"]
+    via_trigger = notion_leads._summary_trigger_properties("\n\n".join(messages), "2026-11-24")["Messages"]
+    assert via_push == via_trigger

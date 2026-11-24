@@ -18,15 +18,19 @@ Secrets (jamais hardcodés) :
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 import discord
+
+import notion_rate
 
 # --- Configuration -----------------------------------------------------------
 
@@ -53,6 +57,10 @@ STEAM_APP_RE = re.compile(r"store\.steampowered\.com/app/(\d+)(?:/([^/?\s]+))?")
 STEAM_NEWS_RE = re.compile(r"store\.steampowered\.com/news/app/(\d+)")
 _STEAM_PREVIEW_LINE_RE = re.compile(r"^(?:Steam|>A_|Release Date|Kickstarter)", re.IGNORECASE)
 _CITATION_RE = re.compile(r"^.+ - \S+\nOP$", re.MULTILINE)
+# Adresse email collée dans un fil (signature, « 📧 contact@studio.com »…).
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+# Domaines jamais retenus comme contact du studio : l'équipe NAGA et Discord.
+EMAIL_EXCLUDED_DOMAINS = ("naga-agency.com", "naga.agency", "nagaagency.com", "discord.com", "discordapp.com")
 
 # Ancien marqueur d'idempotence (désormais remplacé par la propriété
 # « Message IDs »). Conservé uniquement pour le nettoyage par migrate_notion_format.
@@ -103,6 +111,22 @@ def extract_links(text):
 def extract_steam_links(links):
     """Filtre les URLs qui pointent vers une fiche jeu ou une news Steam."""
     return [url for url in links if STEAM_APP_RE.search(url) or STEAM_NEWS_RE.search(url)]
+
+
+def extract_external_email(text):
+    """Première adresse email externe du texte (ni NAGA ni Discord), ou ``None``.
+
+    Les URLs sont retirées avant la recherche : un nom de fichier comme
+    ``logo@2x.png`` au milieu d'un lien ne doit pas passer pour une adresse.
+    """
+    without_urls = URL_RE.sub(" ", text or "")
+    for match in EMAIL_RE.finditer(without_urls):
+        address = match.group(0)
+        domain = address.rsplit("@", 1)[1].lower()
+        if any(domain == excluded or domain.endswith("." + excluded) for excluded in EMAIL_EXCLUDED_DOMAINS):
+            continue
+        return address
+    return None
 
 
 def slug_to_name(slug):
@@ -179,6 +203,17 @@ def format_timestamp(iso):
         return iso
 
 
+def summary_due(dernier_resume, today):
+    """Vrai si le résumé IA d'un lead est à régénérer (jamais fait, ou trop ancien)."""
+    if not dernier_resume:
+        return True
+    try:
+        last_date = datetime.fromisoformat(dernier_resume[:10]).date()
+    except ValueError:
+        return True
+    return (today - last_date).days >= SUMMARY_REFRESH_DAYS
+
+
 def build_message_record(message):
     """Construit la structure JSON standardisée d'un message Discord."""
     text = message.content or ""
@@ -215,6 +250,9 @@ def build_message_record(message):
             }
             for att in message.attachments
         ],
+        # Lien permanent vers le message : repli des pièces jointes, dont les
+        # URLs CDN signées (ex=/is=/hm=) expirent.
+        "jump_url": getattr(message, "jump_url", None),
         # Message posté par un webhook (ex. skill naga-sync-echanges qui poste les
         # mises à jour des jeux) : c'est un échange à faire entrer dans le CRM.
         "webhook": getattr(message, "webhook_id", None) is not None,
@@ -281,6 +319,20 @@ DRIVE_RE = re.compile(
 )
 INSTAGRAM_RE = re.compile(r"instagram\.com", re.IGNORECASE)
 CANVA_RE = re.compile(r"canva\.com|canva\.link", re.IGNORECASE)
+# Plateformes jamais prises pour le site du studio (agrégateurs de liens, pages
+# de store ou de doc, réseaux) : rangées dans Liens. Sous-domaines compris
+# (ex. studio.itch.io, presskit.notion.site).
+NOT_STUDIO_SITE_DOMAINS = (
+    "linktr.ee", "beacons.ai", "itch.io", "gamejolt.com", "notion.site", "notion.so",
+    "discord.gg", "discord.com", "steamcommunity.com", "bsky.app", "tiktok.com",
+    "reddit.com", "linkedin.com", "facebook.com", "twitch.tv",
+)
+
+
+def _is_platform_link(url):
+    """Vrai si l'URL pointe vers une plateforme tierce plutôt qu'un site de studio."""
+    host = (urllib.parse.urlparse(url).hostname or "").lower()
+    return any(host == domain or host.endswith("." + domain) for domain in NOT_STUDIO_SITE_DOMAINS)
 
 
 def _is_exec_context(url, raw_text):
@@ -302,6 +354,8 @@ def _sort_liens(liens, raw_text=""):
     - docs.google.com + contexte 'exec' → exec_docs, sinon → pitch_decks.
     - YouTube / Twitter / Fathom / Drive / Instagram / Canva : tous dans leurs listes.
     - Tout autre https sans catégorie connue → website_studio (premier), puis autres.
+      Les plateformes tierces (linktr.ee, itch.io, *.notion.site…) vont toujours
+      dans autres : ce ne sont pas des sites de studio.
     """
     steam_url = kickstarter = website_studio = None
     pitch_decks = []
@@ -345,13 +399,27 @@ def _sort_liens(liens, raw_text=""):
         elif CANVA_RE.search(url):
             canvas.append(url)
         elif url.startswith("https://"):
-            if website_studio is None:
+            if website_studio is None and not _is_platform_link(url):
                 website_studio = url
             else:
                 autres.append(url)
         else:
             autres.append(url)
     return steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters, fathoms, drives, instagrams, canvas, website_studio, autres_steam, autres
+
+
+def dedup_pieces(pieces):
+    """Pièces jointes dédupliquées (ordre conservé), chacune sous forme de dict.
+
+    Accepte une URL nue ou un dict ``{url, filename, content_type, size,
+    jump_url}``. La clé de dédup ignore la query : les paramètres de signature
+    du CDN Discord changent d'un fetch à l'autre pour le même fichier.
+    """
+    unique = {}
+    for piece in pieces:
+        entry = dict(piece) if isinstance(piece, dict) else {"url": piece}
+        unique.setdefault(entry["url"].split("?", 1)[0], entry)
+    return list(unique.values())
 
 
 def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tags=None, game=None, raw_text=""):
@@ -361,7 +429,8 @@ def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tag
     « messages_full » contient la conversation intégrale (écrite dans le corps de
     la page Notion) ; « messages » n'en garde qu'un aperçu (2000 derniers
     caractères, soit les échanges les plus récents) pour la vue tableau.
-    raw_text : texte brut des messages (URLs incluses) pour la détection exec_doc.
+    raw_text : texte brut des messages (URLs incluses) pour la détection exec_doc
+    et l'extraction de l'email du studio.
     """
     steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters, fathoms, drives, instagrams, canvas, website_studio, autres_steam, autres = _sort_liens(liens, raw_text)
     conversation = "\n\n".join(messages)
@@ -373,7 +442,7 @@ def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tag
         "messages_full": conversation,                  # intégral (empreinte/repli)
         "messages_list": list(messages),                # un message = un bloc dans le corps
         "liens": "\n".join(autres)[:LEAD_TEXT_LIMIT],
-        "pieces_jointes": list(dict.fromkeys(pieces)),
+        "pieces_jointes": dedup_pieces(pieces),
     }
     if tags:
         payload["tags"] = tags
@@ -403,6 +472,10 @@ def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tag
         payload["website_studio"] = website_studio
     if thread_id is not None:
         payload["thread_id"] = str(thread_id)
+    # Écrite seulement si la colonne Email est vide (hors ALWAYS_UPDATE).
+    email = extract_external_email(raw_text)
+    if email:
+        payload["email"] = email
     if game:
         if game.get("developer"):
             payload["studio"] = game["developer"]
@@ -448,14 +521,20 @@ class NotionClient:
             f"{NOTION_API}{path}", data=data, headers=self._headers, method=method
         )
 
+        def _send():
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
         def _do():
+            # Throttle partagé avec notion_leads + nouvel essai sur 429 / 5xx.
+            # Le chemin est loggué sans ses id Notion.
+            safe_path = notion_rate.redact_ids(path)
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+                return notion_rate.call_with_retry(_send, method)
             except urllib.error.HTTPError as exc:
-                raise NotionError(f"Notion {method} {path} → HTTP {exc.code}") from None
+                raise NotionError(f"Notion {method} {safe_path} → HTTP {exc.code}") from None
             except urllib.error.URLError as exc:
-                raise NotionError(f"Notion {method} {path} → {exc.reason}") from None
+                raise NotionError(f"Notion {method} {safe_path} → {exc.reason}") from None
 
         return await asyncio.to_thread(_do)
 
@@ -722,9 +801,38 @@ class NagaScraperBot(discord.Client):
         self._thread_leads = {}
         # {thread_id: page_id} pour le refresh des résumés IA après scraping.
         self._lead_page_ids = {}
+        # {thread_id: asyncio.Lock} : sérialise les pushs d'un même fil.
+        self._push_locks = {}
+        # Scrape complet + résumés IA : une seule fois par processus.
+        self._initial_sync_started = False
+        self._initial_sync_lock = asyncio.Lock()
 
     async def on_ready(self):
-        log(f"Connecté en tant que {self.user} — scraping de l'historique…")
+        # on_ready se redéclenche à chaque nouvelle session gateway (reconnexion
+        # sans RESUME). Relancer le scrape complet doublait tous les appels
+        # Notion, en parallèle du passage en cours : on ne le fait qu'une fois.
+        if self._initial_sync_started:
+            log("Reconnexion à la gateway Discord : scrape complet déjà fait ou en cours, rien n'est relancé.")
+            return
+        await self._run_initial_sync_once()
+
+    async def on_resumed(self):
+        log("Session gateway Discord reprise (RESUME) : aucun événement perdu.")
+
+    async def _run_initial_sync_once(self):
+        """Scrape de l'historique puis résumés IA, en séquence, une seule fois."""
+        async with self._initial_sync_lock:
+            if self._initial_sync_started:
+                return
+            # Posé avant de commencer : même interrompu, le scrape n'est pas
+            # relancé par une reconnexion (il le sera au prochain démarrage).
+            self._initial_sync_started = True
+            log(f"Connecté en tant que {self.user} — scraping de l'historique…")
+            if await self._scrape_history():
+                await self._refresh_lead_summaries()
+
+    async def _scrape_history(self):
+        """Parcourt tout l'historique du channel cible. Faux si le channel est inaccessible."""
         channel = self.get_channel(self._channel_id)
         if channel is None:
             try:
@@ -732,7 +840,7 @@ class NagaScraperBot(discord.Client):
             except discord.DiscordException:
                 log(f"Channel {self._channel_id} introuvable ou inaccessible.")
                 await self.close()
-                return
+                return False
 
         count = 0
         if isinstance(channel, discord.ForumChannel):
@@ -743,7 +851,7 @@ class NagaScraperBot(discord.Client):
         else:
             count += await self._scrape_thread(channel)
         log(f"Historique traité : {count} message(s). Écoute en temps réel active.")
-        await self._refresh_lead_summaries()
+        return True
 
     async def _scrape_thread(self, channel):
         """Parcourt tout l'historique d'un thread/salon et retourne le nombre traité."""
@@ -752,7 +860,7 @@ class NagaScraperBot(discord.Client):
             await self.process_message(message)
             count += 1
         # Conversation du thread complète : on pousse une seule fois vers Leads.
-        self._push_thread_lead(channel.id)
+        await self._push_thread_lead(channel.id)
         return count
 
     def _is_target(self, channel):
@@ -766,7 +874,7 @@ class NagaScraperBot(discord.Client):
         if not accepte_auteur(message) or not self._is_target(message.channel):
             return
         await self.process_message(message)
-        self._push_thread_lead(message.channel.id)
+        await self._push_thread_lead(message.channel.id)
 
     async def on_thread_create(self, thread):
         # Nouveau post de forum : le message d'ouverture peut ne pas déclencher
@@ -775,7 +883,7 @@ class NagaScraperBot(discord.Client):
             return
         async for message in thread.history(limit=None, oldest_first=True):
             await self.process_message(message)
-        self._push_thread_lead(thread.id)
+        await self._push_thread_lead(thread.id)
 
     async def on_thread_update(self, before, after):
         if after.parent_id != self._channel_id:
@@ -807,7 +915,7 @@ class NagaScraperBot(discord.Client):
                     acc["title"] = after.name
                 if tags_changed:
                     acc["tags"] = [t.name for t in getattr(after, "applied_tags", [])]
-                self._push_thread_lead(after.id)
+                await self._push_thread_lead(after.id)
                 log(f"Lead mis à jour pour « {after.name} ».")
 
     async def process_message(self, message):
@@ -819,7 +927,9 @@ class NagaScraperBot(discord.Client):
         """
         try:
             record = build_message_record(message)
-            log(json.dumps(record, ensure_ascii=False))
+            # Ids seulement : le record contient le texte, l'auteur, les liens
+            # et les pièces jointes (emails, téléphones des devs…).
+            log(f"Message {record['message_id']} (channel {record['channel_id']}) reçu.")
 
             channel = message.channel
             in_thread = (
@@ -888,59 +998,81 @@ class NagaScraperBot(discord.Client):
         embed = record.get("embed_text", "")
         acc["raw_texts"].append(f"{raw}\n{embed}".strip())
         acc["liens"].extend(record["links"])
-        acc["pieces"].extend(att["url"] for att in record["attachments"])
+        acc["pieces"].extend(
+            {
+                "url": att["url"],
+                "filename": att.get("filename"),
+                "content_type": att.get("content_type"),
+                "size": att.get("size"),
+                "jump_url": record.get("jump_url"),
+            }
+            for att in record["attachments"]
+        )
         acc["date"] = record["timestamp"]
 
-    def _push_thread_lead(self, thread_id):
-        """Pousse la conversation agrégée d'un thread vers la base Leads."""
+    async def _push_thread_lead(self, thread_id):
+        """Pousse la conversation agrégée d'un thread vers la base Leads.
+
+        Le push (urllib bloquant, avec attentes de throttle et de nouvel essai)
+        tourne dans un thread : la boucle asyncio reste libre pour la gateway
+        Discord, dont les heartbeats ne doivent jamais attendre Notion. Un
+        verrou par fil sérialise les pushs d'un même thread : deux pushs
+        concurrents (ex. on_thread_create + on_message) créeraient deux pages.
+        """
         if self._push_lead is None:
             return
-        acc = self._thread_leads.get(thread_id)
-        if not acc:
-            return
-        # Anti double-push : si rien n'a changé depuis le dernier push de ce
-        # thread (ex. on_thread_create suivi de on_message à l'ouverture), on
-        # n'appelle pas Notion une seconde fois pour un contenu identique.
-        signature = (
-            acc["title"], tuple(acc.get("tags") or ()),
-            len(acc["messages"]), len(acc["liens"]), len(acc["pieces"]), acc.get("date"),
-        )
-        if acc.get("_pushed_sig") == signature:
-            return
-        data = build_lead_payload(
-            acc["title"], acc["messages"], acc["liens"], acc["pieces"], acc.get("date"),
-            thread_id=thread_id,
-            tags=acc.get("tags") or None,
-            game=acc.get("game"),
-            raw_text="\n\n".join(acc.get("raw_texts", [])),
-        )
-        try:
-            result = self._push_lead(data)
-            self._lead_page_ids[thread_id] = result["id"]
-            acc["_pushed_sig"] = signature
-            log(f"Lead poussé : « {acc['title']} ».")
-        except Exception as exc:  # noqa: BLE001 — isole tout échec du module tiers
-            log(f"Échec push Leads pour « {acc['title']} » : {exc}")
+        lock = self._push_locks.setdefault(thread_id, asyncio.Lock())
+        async with lock:
+            acc = self._thread_leads.get(thread_id)
+            if not acc:
+                return
+            # Anti double-push : si rien n'a changé depuis le dernier push de ce
+            # thread (ex. on_thread_create suivi de on_message à l'ouverture), on
+            # n'appelle pas Notion une seconde fois pour un contenu identique.
+            signature = (
+                acc["title"], tuple(acc.get("tags") or ()),
+                len(acc["messages"]), len(acc["liens"]), len(acc["pieces"]), acc.get("date"),
+            )
+            if acc.get("_pushed_sig") == signature:
+                return
+            data = build_lead_payload(
+                acc["title"], acc["messages"], acc["liens"], acc["pieces"], acc.get("date"),
+                thread_id=thread_id,
+                tags=acc.get("tags") or None,
+                game=acc.get("game"),
+                raw_text="\n\n".join(acc.get("raw_texts", [])),
+            )
+            try:
+                result = await asyncio.to_thread(self._push_lead, data)
+                self._lead_page_ids[thread_id] = result["id"]
+                acc["_pushed_sig"] = signature
+                if result.get("action") == "adopted":
+                    log(f"Fiche manuelle adoptée pour « {acc['title']} » (thread {thread_id}).")
+                else:
+                    log(f"Lead poussé : « {acc['title']} ».")
+            except Exception as exc:  # noqa: BLE001 — isole tout échec du module tiers
+                log(f"Échec push Leads pour « {acc['title']} » : {exc}")
 
     async def _refresh_lead_summaries(self):
         """Force le remplissage auto Notion IA sur les leads non rafraîchis depuis SUMMARY_REFRESH_DAYS.
 
         Re-écrit la colonne Messages avec son contenu actuel pour déclencher le remplissage
         automatique Notion IA configuré sur la colonne Summary, puis stamp Dernier résumé.
+
+        Appelée une seule fois par processus, après le scrape, une page à la fois.
         """
         if self._push_lead is None or not self._lead_page_ids:
             return
         import notion_leads
         today = datetime.now(timezone.utc).date()
         refreshed = 0
-        for thread_id, page_id in self._lead_page_ids.items():
+        # Copie : un push concurrent (nouveau fil) peut ajouter une entrée
+        # pendant les await, ce qui ferait lever l'itération sur le dict.
+        for thread_id, page_id in list(self._lead_page_ids.items()):
             try:
                 info = await asyncio.to_thread(notion_leads.get_page_summary_info, page_id)
-                dernier = info.get("dernier_resume")
-                if dernier:
-                    last_date = datetime.fromisoformat(dernier[:10]).date()
-                    if (today - last_date).days < SUMMARY_REFRESH_DAYS:
-                        continue
+                if not summary_due(info.get("dernier_resume"), today):
+                    continue
                 acc = self._thread_leads.get(thread_id)
                 if not acc:
                     continue
@@ -949,7 +1081,7 @@ class NagaScraperBot(discord.Client):
                     notion_leads.trigger_ai_summary, page_id, messages_text, today.isoformat()
                 )
                 refreshed += 1
-                log(f"Remplissage Notion IA déclenché pour la page lead {page_id}.")
+                log(f"Remplissage Notion IA déclenché pour le thread {thread_id}.")
             except Exception as exc:  # noqa: BLE001
                 log(f"Échec déclenchement résumé pour thread {thread_id} : {exc}")
         if refreshed:
@@ -959,6 +1091,9 @@ class NagaScraperBot(discord.Client):
 async def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    # Logs de la gateway discord.py (connexion, RESUME, « heartbeat blocked »)
+    # sur stdout : bot.start(), contrairement à bot.run(), n'en configure aucun.
+    discord.utils.setup_logging(handler=logging.StreamHandler(sys.stdout), level=logging.INFO, root=False)
 
     discord_env = load_env_file(ENV_DISCORD, ["DISCORD_TOKEN", "DISCORD_CHANNEL_ID"])
 
