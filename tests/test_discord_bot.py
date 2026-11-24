@@ -1024,3 +1024,20 @@ def test_accumulate_lead_piece_avec_metadonnees_et_lien_du_message():
         "url": _CDN, "filename": "deck.pdf", "content_type": "application/pdf",
         "size": 10, "jump_url": "https://discord.com/channels/1/2/3",
     }]
+
+
+# --- logs : jamais de contenu de message ---------------------------------------
+
+def test_process_message_ne_logge_pas_le_contenu(monkeypatch):
+    logs = []
+    monkeypatch.setattr(discord_bot, "log", logs.append)
+    bot = _bare_bot()
+    bot._channel_id = 1
+    bot._notion = None
+    msg = _fake_message()
+    msg.content = "Contact : dev@studio.io, tel +33 6 12 34 56 78"  # pas de lien Steam : aucun appel réseau
+    asyncio.run(bot.process_message(msg))
+    joined = "\n".join(logs)
+    assert "999" in joined
+    for secret in ("dev@studio.io", "+33", "Alice", "alice#0001", "screenshot.png"):
+        assert secret not in joined

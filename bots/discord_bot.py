@@ -910,7 +910,9 @@ class NagaScraperBot(discord.Client):
         """
         try:
             record = build_message_record(message)
-            log(json.dumps(record, ensure_ascii=False))
+            # Ids seulement : le record contient le texte, l'auteur, les liens
+            # et les pièces jointes (emails, téléphones des devs…).
+            log(f"Message {record['message_id']} (channel {record['channel_id']}) reçu.")
 
             channel = message.channel
             in_thread = (
