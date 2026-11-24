@@ -18,6 +18,7 @@ Secrets (jamais hardcodés) :
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -199,6 +200,17 @@ def format_timestamp(iso):
         return datetime.fromisoformat(iso).strftime("%d.%m.%Y %H:%M")
     except ValueError:
         return iso
+
+
+def summary_due(dernier_resume, today):
+    """Vrai si le résumé IA d'un lead est à régénérer (jamais fait, ou trop ancien)."""
+    if not dernier_resume:
+        return True
+    try:
+        last_date = datetime.fromisoformat(dernier_resume[:10]).date()
+    except ValueError:
+        return True
+    return (today - last_date).days >= SUMMARY_REFRESH_DAYS
 
 
 def build_message_record(message):
@@ -757,9 +769,36 @@ class NagaScraperBot(discord.Client):
         self._lead_page_ids = {}
         # {thread_id: asyncio.Lock} : sérialise les pushs d'un même fil.
         self._push_locks = {}
+        # Scrape complet + résumés IA : une seule fois par processus.
+        self._initial_sync_started = False
+        self._initial_sync_lock = asyncio.Lock()
 
     async def on_ready(self):
-        log(f"Connecté en tant que {self.user} — scraping de l'historique…")
+        # on_ready se redéclenche à chaque nouvelle session gateway (reconnexion
+        # sans RESUME). Relancer le scrape complet doublait tous les appels
+        # Notion, en parallèle du passage en cours : on ne le fait qu'une fois.
+        if self._initial_sync_started:
+            log("Reconnexion à la gateway Discord : scrape complet déjà fait ou en cours, rien n'est relancé.")
+            return
+        await self._run_initial_sync_once()
+
+    async def on_resumed(self):
+        log("Session gateway Discord reprise (RESUME) : aucun événement perdu.")
+
+    async def _run_initial_sync_once(self):
+        """Scrape de l'historique puis résumés IA, en séquence, une seule fois."""
+        async with self._initial_sync_lock:
+            if self._initial_sync_started:
+                return
+            # Posé avant de commencer : même interrompu, le scrape n'est pas
+            # relancé par une reconnexion (il le sera au prochain démarrage).
+            self._initial_sync_started = True
+            log(f"Connecté en tant que {self.user} — scraping de l'historique…")
+            if await self._scrape_history():
+                await self._refresh_lead_summaries()
+
+    async def _scrape_history(self):
+        """Parcourt tout l'historique du channel cible. Faux si le channel est inaccessible."""
         channel = self.get_channel(self._channel_id)
         if channel is None:
             try:
@@ -767,7 +806,7 @@ class NagaScraperBot(discord.Client):
             except discord.DiscordException:
                 log(f"Channel {self._channel_id} introuvable ou inaccessible.")
                 await self.close()
-                return
+                return False
 
         count = 0
         if isinstance(channel, discord.ForumChannel):
@@ -778,7 +817,7 @@ class NagaScraperBot(discord.Client):
         else:
             count += await self._scrape_thread(channel)
         log(f"Historique traité : {count} message(s). Écoute en temps réel active.")
-        await self._refresh_lead_summaries()
+        return True
 
     async def _scrape_thread(self, channel):
         """Parcourt tout l'historique d'un thread/salon et retourne le nombre traité."""
@@ -971,20 +1010,21 @@ class NagaScraperBot(discord.Client):
 
         Re-écrit la colonne Messages avec son contenu actuel pour déclencher le remplissage
         automatique Notion IA configuré sur la colonne Summary, puis stamp Dernier résumé.
+
+        Appelée une seule fois par processus, après le scrape, une page à la fois.
         """
         if self._push_lead is None or not self._lead_page_ids:
             return
         import notion_leads
         today = datetime.now(timezone.utc).date()
         refreshed = 0
-        for thread_id, page_id in self._lead_page_ids.items():
+        # Copie : un push concurrent (nouveau fil) peut ajouter une entrée
+        # pendant les await, ce qui ferait lever l'itération sur le dict.
+        for thread_id, page_id in list(self._lead_page_ids.items()):
             try:
                 info = await asyncio.to_thread(notion_leads.get_page_summary_info, page_id)
-                dernier = info.get("dernier_resume")
-                if dernier:
-                    last_date = datetime.fromisoformat(dernier[:10]).date()
-                    if (today - last_date).days < SUMMARY_REFRESH_DAYS:
-                        continue
+                if not summary_due(info.get("dernier_resume"), today):
+                    continue
                 acc = self._thread_leads.get(thread_id)
                 if not acc:
                     continue
@@ -993,7 +1033,7 @@ class NagaScraperBot(discord.Client):
                     notion_leads.trigger_ai_summary, page_id, messages_text, today.isoformat()
                 )
                 refreshed += 1
-                log(f"Remplissage Notion IA déclenché pour la page lead {page_id}.")
+                log(f"Remplissage Notion IA déclenché pour le thread {thread_id}.")
             except Exception as exc:  # noqa: BLE001
                 log(f"Échec déclenchement résumé pour thread {thread_id} : {exc}")
         if refreshed:
@@ -1003,6 +1043,9 @@ class NagaScraperBot(discord.Client):
 async def main():
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    # Logs de la gateway discord.py (connexion, RESUME, « heartbeat blocked »)
+    # sur stdout : bot.start(), contrairement à bot.run(), n'en configure aucun.
+    discord.utils.setup_logging(handler=logging.StreamHandler(sys.stdout), level=logging.INFO, root=False)
 
     discord_env = load_env_file(ENV_DISCORD, ["DISCORD_TOKEN", "DISCORD_CHANNEL_ID"])
 

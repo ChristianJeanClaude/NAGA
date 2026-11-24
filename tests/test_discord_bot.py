@@ -733,6 +733,9 @@ def _bare_bot(push_lead=None):
     bot._lead_page_ids = {}
     bot._push_locks = {}
     bot._push_lead = push_lead
+    bot._initial_sync_started = False
+    bot._initial_sync_lock = asyncio.Lock()
+    bot._connection = SimpleNamespace(user="Naga Scout Bot#0001")  # pour bot.user
     return bot
 
 
@@ -904,3 +907,83 @@ def test_build_lead_payload_email_depuis_raw_text():
 def test_build_lead_payload_sans_email():
     payload = discord_bot.build_lead_payload("Jeu", ["m"], [], [], "2026-06-01", raw_text="rien")
     assert "email" not in payload
+
+
+# --- reconnexions gateway : un seul scrape complet par processus --------------
+
+def _sync_bot(order, scrape_ok=True):
+    """Bot nu dont le scrape et les résumés IA sont remplacés par des stubs."""
+    bot = _bare_bot()
+
+    async def fake_scrape():
+        order.append("scrape")
+        await asyncio.sleep(0.01)  # laisse une reconnexion arriver pendant le scrape
+        return scrape_ok
+
+    async def fake_refresh():
+        order.append("refresh")
+
+    bot._scrape_history = fake_scrape
+    bot._refresh_lead_summaries = fake_refresh
+    return bot
+
+
+def test_on_ready_reconnexion_pendant_le_scrape_ne_relance_rien():
+    order = []
+    bot = _sync_bot(order)
+
+    async def scenario():
+        await asyncio.gather(bot.on_ready(), bot.on_ready())
+
+    asyncio.run(scenario())
+    assert order == ["scrape", "refresh"]
+
+
+def test_on_ready_reconnexion_apres_le_scrape_ne_relance_rien(monkeypatch):
+    logs = []
+    monkeypatch.setattr(discord_bot, "log", logs.append)
+    order = []
+    bot = _sync_bot(order)
+
+    async def scenario():
+        await bot.on_ready()
+        await bot.on_ready()  # nouvelle session gateway, même processus
+
+    asyncio.run(scenario())
+    assert order == ["scrape", "refresh"]
+    assert any(line.startswith("Reconnexion") for line in logs)
+
+
+def test_on_ready_resumes_ia_apres_le_scrape_et_en_sequence():
+    order = []
+    asyncio.run(_sync_bot(order).on_ready())
+    assert order == ["scrape", "refresh"]
+
+
+def test_on_ready_pas_de_resumes_si_channel_inaccessible():
+    order = []
+    asyncio.run(_sync_bot(order, scrape_ok=False).on_ready())
+    assert order == ["scrape"]
+
+
+# --- summary_due -------------------------------------------------------------
+
+_TODAY = datetime(2026, 11, 24, tzinfo=timezone.utc).date()
+
+
+def test_summary_due_jamais_fait():
+    assert discord_bot.summary_due(None, _TODAY) is True
+    assert discord_bot.summary_due("", _TODAY) is True
+
+
+def test_summary_due_recent():
+    assert discord_bot.summary_due("2026-11-20", _TODAY) is False
+
+
+def test_summary_due_ancien():
+    assert discord_bot.summary_due("2026-11-10", _TODAY) is True  # 14 jours pile
+    assert discord_bot.summary_due("2026-11-10T09:00:00.000+00:00", _TODAY) is True
+
+
+def test_summary_due_date_illisible():
+    assert discord_bot.summary_due("pas une date", _TODAY) is True
