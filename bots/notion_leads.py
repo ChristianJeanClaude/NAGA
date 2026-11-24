@@ -131,9 +131,27 @@ def _truncate_utf16(content: str, limit: int) -> str:
     return encoded[: limit * 2].decode("utf-16-le", errors="ignore")
 
 
+def _tail_utf16(content: str, limit: int) -> str:
+    """Garde la FIN de ``content`` : ses ``limit`` dernières unités UTF-16.
+
+    Pendant de _truncate_utf16 pour la colonne Messages, où ce sont les
+    échanges les plus récents qui comptent. Une demi-paire de substitution en
+    tête de coupe est jetée.
+    """
+    encoded = content.encode("utf-16-le")
+    if len(encoded) <= limit * 2:
+        return content
+    return encoded[-limit * 2:].decode("utf-16-le", errors="ignore")
+
+
 def _rich_text(content: str) -> dict:
     """Construit une propriété rich_text en tronquant à la limite Notion (2000 unités UTF-16)."""
     return {"rich_text": [{"text": {"content": _truncate_utf16(content, NOTION_RICH_TEXT_LIMIT)}}]}
+
+
+def _rich_text_tail(content: str) -> dict:
+    """Propriété rich_text qui garde la fin du texte (colonne Messages)."""
+    return {"rich_text": [{"text": {"content": _tail_utf16(content, NOTION_RICH_TEXT_LIMIT)}}]}
 
 
 def _prop_text(prop: dict) -> str:
@@ -470,7 +488,8 @@ def _build_properties(data: dict, title_prop: str = None) -> dict:
     if data.get("date"):
         props["Dernier échange"] = {"date": {"start": data["date"]}}
     if data.get("messages"):
-        props["Messages"] = _rich_text(data["messages"])
+        # Aperçu : la FIN de la conversation (échanges récents), pas le début.
+        props["Messages"] = _rich_text_tail(data["messages"])
     if data.get("liens"):
         props["Liens"] = _rich_text(data["liens"])
     if data.get("pieces_jointes"):
@@ -669,10 +688,20 @@ def trigger_ai_summary(page_id: str, messages_text: str, date_str: str) -> None:
     Notion IA recalcule Summary automatiquement quand sa source (Messages) change.
     Stamp Dernier résumé dans le même appel pour tracker la dernière régénération.
     """
-    _request("PATCH", f"/pages/{page_id}", {"properties": {
-        "Messages": _rich_text(messages_text),
+    _request("PATCH", f"/pages/{page_id}", {"properties": _summary_trigger_properties(messages_text, date_str)})
+
+
+def _summary_trigger_properties(messages_text: str, date_str: str) -> dict:
+    """Propriétés écrites par trigger_ai_summary.
+
+    Messages garde la FIN de la conversation, comme au push : _rich_text
+    coupait par le début, si bien que sur les fils longs la colonne montrait
+    les 2000 premiers caractères et s'arrêtait en plein mot.
+    """
+    return {
+        "Messages": _rich_text_tail(messages_text),
         "Dernier résumé": {"date": {"start": date_str}},
-    }})
+    }
 
 
 if __name__ == "__main__":

@@ -435,3 +435,52 @@ def test_download_refuse_un_hote_hors_cdn_discord():
 def test_upload_attachment_trop_lourd_sans_telechargement():
     piece = {"url": _CDN, "size": notion_leads.MAX_UPLOAD_BYTES + 1}
     assert notion_leads._upload_attachment(piece) is None
+
+
+# --- colonne Messages : garder la FIN de la conversation ----------------------
+
+def _long_thread():
+    """Fil long façon Kiryon (1571824726165164173) : 60 messages numérotés."""
+    return "\n\n".join(f"[01/11/2026 10:{i:02d} - Dev] message numéro {i:02d}" for i in range(60))
+
+
+def test_tail_utf16_garde_la_fin():
+    assert notion_leads._tail_utf16("abcdef", 3) == "def"
+
+
+def test_tail_utf16_court_inchange():
+    assert notion_leads._tail_utf16("abc", 2000) == "abc"
+
+
+def test_tail_utf16_emoji_respecte_limite_et_jette_la_demi_paire():
+    s = "🧱" + "a" * 1999  # 2001 unités : la coupe tombe au milieu de l'emoji
+    tail = notion_leads._tail_utf16(s, 2000)
+    assert tail == "a" * 1999
+    assert _utf16_units(tail) <= 2000
+
+
+def test_build_properties_messages_garde_la_fin():
+    conversation = _long_thread()
+    props = notion_leads._build_properties({"nom_du_jeu": "Kiryon", "messages": conversation})
+    contenu = props["Messages"]["rich_text"][0]["text"]["content"]
+    assert contenu.endswith("message numéro 59")
+    assert "message numéro 00" not in contenu
+    assert _utf16_units(contenu) <= 2000
+
+
+def test_summary_trigger_properties_garde_la_fin():
+    # Régression : trigger_ai_summary écrivait les 2000 PREMIERS caractères.
+    props = notion_leads._summary_trigger_properties(_long_thread(), "2026-11-24")
+    contenu = props["Messages"]["rich_text"][0]["text"]["content"]
+    assert contenu.endswith("message numéro 59")
+    assert "message numéro 00" not in contenu
+    assert props["Dernier résumé"] == {"date": {"start": "2026-11-24"}}
+
+
+def test_summary_trigger_et_push_ecrivent_le_meme_apercu():
+    import discord_bot
+    messages = [f"[01/11/2026 10:{i:02d} - Dev] message numéro {i:02d} 🧱" for i in range(60)]
+    payload = discord_bot.build_lead_payload("Kiryon", messages, [], [], "2026-11-24")
+    via_push = notion_leads._build_properties(payload)["Messages"]
+    via_trigger = notion_leads._summary_trigger_properties("\n\n".join(messages), "2026-11-24")["Messages"]
+    assert via_push == via_trigger
