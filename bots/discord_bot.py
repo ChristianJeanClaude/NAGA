@@ -53,6 +53,10 @@ STEAM_APP_RE = re.compile(r"store\.steampowered\.com/app/(\d+)(?:/([^/?\s]+))?")
 STEAM_NEWS_RE = re.compile(r"store\.steampowered\.com/news/app/(\d+)")
 _STEAM_PREVIEW_LINE_RE = re.compile(r"^(?:Steam|>A_|Release Date|Kickstarter)", re.IGNORECASE)
 _CITATION_RE = re.compile(r"^.+ - \S+\nOP$", re.MULTILINE)
+# Adresse email collée dans un fil (signature, « 📧 contact@studio.com »…).
+EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}")
+# Domaines jamais retenus comme contact du studio : l'équipe NAGA et Discord.
+EMAIL_EXCLUDED_DOMAINS = ("naga-agency.com", "naga.agency", "nagaagency.com", "discord.com", "discordapp.com")
 
 # Ancien marqueur d'idempotence (désormais remplacé par la propriété
 # « Message IDs »). Conservé uniquement pour le nettoyage par migrate_notion_format.
@@ -103,6 +107,22 @@ def extract_links(text):
 def extract_steam_links(links):
     """Filtre les URLs qui pointent vers une fiche jeu ou une news Steam."""
     return [url for url in links if STEAM_APP_RE.search(url) or STEAM_NEWS_RE.search(url)]
+
+
+def extract_external_email(text):
+    """Première adresse email externe du texte (ni NAGA ni Discord), ou ``None``.
+
+    Les URLs sont retirées avant la recherche : un nom de fichier comme
+    ``logo@2x.png`` au milieu d'un lien ne doit pas passer pour une adresse.
+    """
+    without_urls = URL_RE.sub(" ", text or "")
+    for match in EMAIL_RE.finditer(without_urls):
+        address = match.group(0)
+        domain = address.rsplit("@", 1)[1].lower()
+        if any(domain == excluded or domain.endswith("." + excluded) for excluded in EMAIL_EXCLUDED_DOMAINS):
+            continue
+        return address
+    return None
 
 
 def slug_to_name(slug):
@@ -361,7 +381,8 @@ def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tag
     « messages_full » contient la conversation intégrale (écrite dans le corps de
     la page Notion) ; « messages » n'en garde qu'un aperçu (2000 derniers
     caractères, soit les échanges les plus récents) pour la vue tableau.
-    raw_text : texte brut des messages (URLs incluses) pour la détection exec_doc.
+    raw_text : texte brut des messages (URLs incluses) pour la détection exec_doc
+    et l'extraction de l'email du studio.
     """
     steam_url, kickstarter, pitch_decks, exec_docs, youtubes, twitters, fathoms, drives, instagrams, canvas, website_studio, autres_steam, autres = _sort_liens(liens, raw_text)
     conversation = "\n\n".join(messages)
@@ -403,6 +424,10 @@ def build_lead_payload(title, messages, liens, pieces, date, thread_id=None, tag
         payload["website_studio"] = website_studio
     if thread_id is not None:
         payload["thread_id"] = str(thread_id)
+    # Écrite seulement si la colonne Email est vide (hors ALWAYS_UPDATE).
+    email = extract_external_email(raw_text)
+    if email:
+        payload["email"] = email
     if game:
         if game.get("developer"):
             payload["studio"] = game["developer"]

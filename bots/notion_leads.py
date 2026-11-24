@@ -220,11 +220,25 @@ def _is_empty(prop: dict) -> bool:
     ptype = prop.get("type")
     if ptype in ("rich_text", "title", "files"):
         return not prop.get(ptype)
-    if ptype in ("date", "url", "number", "select"):
+    if ptype in ("date", "url", "number", "select", "email"):
         return prop.get(ptype) is None
     if ptype == "multi_select":
         return not prop.get("multi_select")
     return False
+
+
+def _update_patch(properties: dict, existing_props: dict) -> dict:
+    """Propriétés à écrire sur une page existante.
+
+    Les champs de ALWAYS_UPDATE sont toujours réécrits ; les autres seulement si
+    la colonne est vide côté Notion (ex. Email : une adresse saisie à la main
+    n'est jamais écrasée par celle trouvée dans le fil).
+    """
+    return {
+        name: value
+        for name, value in properties.items()
+        if name in ALWAYS_UPDATE or _is_empty(existing_props.get(name, {}))
+    }
 
 
 def _build_properties(data: dict, title_prop: str = None) -> dict:
@@ -341,11 +355,7 @@ def push_to_notion(data: dict) -> dict:
         existing_props = _request("GET", f"/pages/{page_id}").get("properties", {})
         # Corps à réécrire seulement si la conversation a changé (empreinte).
         body_changed = bool(full_text) and _prop_text(existing_props.get("Conv sync")) != sig
-        patch = {
-            name: value
-            for name, value in properties.items()
-            if name in ALWAYS_UPDATE or _is_empty(existing_props.get(name, {}))
-        }
+        patch = _update_patch(properties, existing_props)
         if body_changed:
             patch["Conv sync"] = _rich_text(sig)
         if patch:

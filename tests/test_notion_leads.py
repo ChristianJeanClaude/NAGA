@@ -271,3 +271,31 @@ def test_conv_sig_deterministe_et_sensible():
 
 def test_conv_sync_dans_managed_columns():
     assert "Conv sync" in notion_leads.MANAGED_COLUMNS
+
+
+# --- _update_patch : ce qui est réécrit sur une page existante ---------------
+
+def _email_prop(address):
+    return {"type": "email", "email": address}
+
+
+def test_email_absent_de_always_update():
+    assert "Email" not in notion_leads.ALWAYS_UPDATE
+
+
+def test_update_patch_email_existant_non_ecrase():
+    properties = notion_leads._build_properties({"nom_du_jeu": "J", "email": "bot@studio.io"})
+    patch = notion_leads._update_patch(properties, {"Email": _email_prop("humain@studio.io")})
+    assert "Email" not in patch
+
+
+def test_update_patch_email_vide_rempli():
+    properties = notion_leads._build_properties({"nom_du_jeu": "J", "email": "bot@studio.io"})
+    patch = notion_leads._update_patch(properties, {"Email": _email_prop(None)})
+    assert patch["Email"] == {"email": "bot@studio.io"}
+
+
+def test_update_patch_always_update_ecrase():
+    properties = notion_leads._build_properties({"nom_du_jeu": "J", "messages": "nouveau"})
+    existing = {"Messages": {"type": "rich_text", "rich_text": [{"plain_text": "ancien"}]}}
+    assert "Messages" in notion_leads._update_patch(properties, existing)

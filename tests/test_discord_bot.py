@@ -805,3 +805,47 @@ def test_clean_message_text_webhook_supprime_quand_meme_les_urls():
     text = "Deck: https://docs.google.com/presentation/d/abc"
     result = discord_bot.clean_message_text(text, "Échanges email", _TS, keep_previews=True)
     assert "https://" not in result
+
+
+# --- email du studio (extract_external_email) --------------------------------
+
+def test_extract_external_email_signature():
+    text = ("Je suis retourné sur le stand\n\nJane Doe\nCo-Founder @ Studio Exemple\n"
+            " jane.dev@example.com\n +00 000 000 000")
+    assert discord_bot.extract_external_email(text) == "jane.dev@example.com"
+
+
+def test_extract_external_email_apres_emoji():
+    assert discord_bot.extract_external_email("📧 studio.contact@example.com") == "studio.contact@example.com"
+
+
+def test_extract_external_email_ignore_naga_et_prend_la_suivante():
+    text = "Copie à ewan@naga-agency.com, contact studio : dev@studio.io."
+    assert discord_bot.extract_external_email(text) == "dev@studio.io"
+
+
+def test_extract_external_email_ignore_discord():
+    assert discord_bot.extract_external_email("noreply@discord.com") is None
+    assert discord_bot.extract_external_email("x@mail.discordapp.com") is None
+
+
+def test_extract_external_email_ignore_les_urls():
+    text = "Logo : https://cdn.example.com/img/logo@2x.png"
+    assert discord_bot.extract_external_email(text) is None
+
+
+def test_extract_external_email_aucune():
+    assert discord_bot.extract_external_email("Pas d'adresse ici @ demain") is None
+    assert discord_bot.extract_external_email("") is None
+    assert discord_bot.extract_external_email(None) is None
+
+
+def test_build_lead_payload_email_depuis_raw_text():
+    raw = "Super jeu\n\n📧 studio.contact@example.com\nhttps://store.steampowered.com/app/1"
+    payload = discord_bot.build_lead_payload("Kiryon", ["m"], [], [], "2026-06-01", raw_text=raw)
+    assert payload["email"] == "studio.contact@example.com"
+
+
+def test_build_lead_payload_sans_email():
+    payload = discord_bot.build_lead_payload("Jeu", ["m"], [], [], "2026-06-01", raw_text="rien")
+    assert "email" not in payload
