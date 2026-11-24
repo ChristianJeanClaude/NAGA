@@ -237,18 +237,64 @@ def _is_empty(prop: dict) -> bool:
     return False
 
 
-def _update_patch(properties: dict, existing_props: dict) -> dict:
+def _update_patch(properties: dict, existing_props: dict, only_empty: bool = False) -> dict:
     """Propriétés à écrire sur une page existante.
 
     Les champs de ALWAYS_UPDATE sont toujours réécrits ; les autres seulement si
     la colonne est vide côté Notion (ex. Email : une adresse saisie à la main
-    n'est jamais écrasée par celle trouvée dans le fil).
+    n'est jamais écrasée par celle trouvée dans le fil). ``only_empty`` (fiche
+    manuelle adoptée) ne remplit que les colonnes vides, ALWAYS_UPDATE compris.
     """
     return {
         name: value
         for name, value in properties.items()
-        if name in ALWAYS_UPDATE or _is_empty(existing_props.get(name, {}))
+        if (name in ALWAYS_UPDATE and not only_empty) or _is_empty(existing_props.get(name, {}))
     }
+
+
+def _normalize_title(title: str) -> str:
+    """Titre comparable : sans casse ni espaces (« Battle Only » == « battleonly »)."""
+    return "".join((title or "").split()).casefold()
+
+
+def _page_title(page: dict) -> str:
+    """Texte brut de la propriété titre d'une page (quel que soit son nom)."""
+    for prop in page.get("properties", {}).values():
+        if prop.get("type") == "title":
+            return "".join(t.get("plain_text", "") for t in prop.get("title", []))
+    return ""
+
+
+def _pick_adoptable(pages: list, title: str):
+    """Id de l'unique page dont le titre correspond à ``title``, sinon None.
+
+    Plusieurs homonymes : on ne devine pas, le bot crée sa propre fiche.
+    """
+    wanted = _normalize_title(title)
+    matches = [p["id"] for p in pages if _normalize_title(_page_title(p)) == wanted]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _find_adoptable_page(title: str):
+    """Fiche créée à la main (Thread ID vide) portant le même titre que le fil.
+
+    Notion ne filtre pas un titre sans casse ni espaces : on liste les fiches
+    sans Thread ID et on compare côté Python.
+    """
+    pages, cursor = [], None
+    while True:
+        query = {
+            "filter": {"property": "Thread ID", "rich_text": {"is_empty": True}},
+            "page_size": 100,
+        }
+        if cursor:
+            query["start_cursor"] = cursor
+        r = _request("POST", f"/databases/{DB_ID}/query", query)
+        pages.extend(r.get("results", []))
+        if not r.get("has_more"):
+            break
+        cursor = r.get("next_cursor")
+    return _pick_adoptable(pages, title)
 
 
 def _build_properties(data: dict, title_prop: str = None) -> dict:
@@ -334,7 +380,11 @@ def push_to_notion(data: dict) -> dict:
     La conversation intégrale (``messages_full``) est écrite dans le CORPS de la
     page (blocs), sans coupure ; la propriété ``Messages`` n'en garde qu'un aperçu.
 
-    Retourne {"action": "created"|"updated", "id": "<page_id>"}.
+    Si aucune page ne porte ce Thread ID mais qu'une seule fiche créée à la main
+    (Thread ID vide) a le même titre, elle est adoptée : le bot y écrit le
+    Thread ID et ne remplit que les colonnes vides, au lieu de créer un doublon.
+
+    Retourne {"action": "created"|"updated"|"adopted", "id": "<page_id>"}.
     """
     # Conversation intégrale destinée au corps de page (repli sur l'aperçu).
     full_text = data.get("messages_full") or data.get("messages") or ""
@@ -343,6 +393,7 @@ def push_to_notion(data: dict) -> dict:
         messages_list = [full_text] if full_text else []
     sig = _conv_sig(full_text) if full_text else ""
 
+    adopted = False
     if data.get("thread_id"):
         result = _request("POST", f"/databases/{DB_ID}/query", {
             "filter": {
@@ -350,6 +401,10 @@ def push_to_notion(data: dict) -> dict:
                 "rich_text": {"equals": str(data["thread_id"])},
             }
         })
+        page_id = result["results"][0]["id"] if result["results"] else None
+        if page_id is None:
+            page_id = _find_adoptable_page(data["nom_du_jeu"])
+            adopted = page_id is not None
     else:
         result = _request("POST", f"/databases/{DB_ID}/query", {
             "filter": {
@@ -357,22 +412,22 @@ def push_to_notion(data: dict) -> dict:
                 "title": {"equals": data["nom_du_jeu"]},
             }
         })
+        page_id = result["results"][0]["id"] if result["results"] else None
 
     properties = _build_properties(data, _TITLE_PROP)
 
-    if result["results"]:
-        page_id = result["results"][0]["id"]
+    if page_id is not None:
         existing_props = _request("GET", f"/pages/{page_id}").get("properties", {})
         # Corps à réécrire seulement si la conversation a changé (empreinte).
         body_changed = bool(full_text) and _prop_text(existing_props.get("Conv sync")) != sig
-        patch = _update_patch(properties, existing_props)
+        patch = _update_patch(properties, existing_props, only_empty=adopted)
         if body_changed:
             patch["Conv sync"] = _rich_text(sig)
         if patch:
             _request("PATCH", f"/pages/{page_id}", {"properties": patch})
         if body_changed:
             _sync_conversation_body(page_id, messages_list)
-        return {"action": "updated", "id": page_id}
+        return {"action": "adopted" if adopted else "updated", "id": page_id}
     else:
         if full_text:
             properties["Conv sync"] = _rich_text(sig)

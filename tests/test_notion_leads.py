@@ -299,3 +299,56 @@ def test_update_patch_always_update_ecrase():
     properties = notion_leads._build_properties({"nom_du_jeu": "J", "messages": "nouveau"})
     existing = {"Messages": {"type": "rich_text", "rich_text": [{"plain_text": "ancien"}]}}
     assert "Messages" in notion_leads._update_patch(properties, existing)
+
+
+# --- adoption des fiches créées à la main ------------------------------------
+
+def _page(page_id, title, title_prop="Jeu"):
+    return {"id": page_id, "properties": {
+        title_prop: {"type": "title", "title": [{"plain_text": title}]},
+        "Thread ID": {"type": "rich_text", "rich_text": []},
+    }}
+
+
+def test_normalize_title_casse_et_espaces():
+    assert notion_leads._normalize_title("Battle Only (Tatakau Dake)") == \
+        notion_leads._normalize_title("  battle  only(tatakau dake) ")
+    assert notion_leads._normalize_title(None) == ""
+
+
+def test_page_title_quel_que_soit_le_nom_de_la_propriete():
+    assert notion_leads._page_title(_page("p", "Absym", title_prop="Nom du jeu")) == "Absym"
+    assert notion_leads._page_title({"properties": {}}) == ""
+
+
+def test_pick_adoptable_fiche_manuelle_unique():
+    pages = [_page("manuelle", "Battle Only (Tatakau Dake)"), _page("autre", "Absym")]
+    assert notion_leads._pick_adoptable(pages, "battle only (tatakau dake)") == "manuelle"
+
+
+def test_pick_adoptable_homonymes_pas_d_adoption():
+    pages = [_page("a", "Absym"), _page("b", "ABSYM ")]
+    assert notion_leads._pick_adoptable(pages, "Absym") is None
+
+
+def test_pick_adoptable_aucune_correspondance():
+    assert notion_leads._pick_adoptable([_page("a", "Absym")], "Kiryon") is None
+    assert notion_leads._pick_adoptable([], "Kiryon") is None
+
+
+def test_update_patch_adoption_ne_remplit_que_les_vides():
+    properties = notion_leads._build_properties(
+        {"nom_du_jeu": "Battle Only (Tatakau Dake)", "thread_id": "1571", "messages": "fil",
+         "tags": ["Prio"], "studio": "Studio X"},
+        "Jeu",
+    )
+    existing = {
+        "Jeu": {"type": "title", "title": [{"plain_text": "Battle Only (Tatakau Dake)"}]},
+        "Thread ID": {"type": "rich_text", "rich_text": []},
+        "Messages": {"type": "rich_text", "rich_text": [{"plain_text": "note humaine"}]},
+        "Tags": {"type": "multi_select", "multi_select": [{"name": "CoPublish"}]},
+        "Studio": {"type": "rich_text", "rich_text": []},
+    }
+    patch = notion_leads._update_patch(properties, existing, only_empty=True)
+    assert set(patch) == {"Thread ID", "Studio"}  # titre, Messages, Tags humains intacts
+    assert patch["Thread ID"]["rich_text"][0]["text"]["content"] == "1571"

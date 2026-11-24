@@ -1001,7 +1001,10 @@ class NagaScraperBot(discord.Client):
                 result = await asyncio.to_thread(self._push_lead, data)
                 self._lead_page_ids[thread_id] = result["id"]
                 acc["_pushed_sig"] = signature
-                log(f"Lead poussé : « {acc['title']} ».")
+                if result.get("action") == "adopted":
+                    log(f"Fiche manuelle adoptée pour « {acc['title']} » (thread {thread_id}).")
+                else:
+                    log(f"Lead poussé : « {acc['title']} ».")
             except Exception as exc:  # noqa: BLE001 — isole tout échec du module tiers
                 log(f"Échec push Leads pour « {acc['title']} » : {exc}")
 
