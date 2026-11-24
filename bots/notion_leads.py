@@ -12,6 +12,8 @@ import os
 import urllib.error
 import urllib.request
 
+import notion_rate
+
 NOTION_TOKEN = os.environ.get("NOTION_TOKEN_LEADS", "")
 # Id de la base Leads : configurable via NOTION_DB_LEADS_ID (~/.env.notion),
 # avec l'ancienne valeur codée en dur comme repli rétrocompatible.
@@ -21,6 +23,8 @@ BASE_URL = "https://api.notion.com/v1"
 
 
 def _request(method: str, path: str, body: dict | None = None) -> dict:
+    """Appel JSON à l'API Notion, sous le throttle partagé et avec nouvel essai
+    sur 429 / 5xx (voir notion_rate)."""
     url = f"{BASE_URL}{path}"
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(
@@ -33,16 +37,22 @@ def _request(method: str, path: str, body: dict | None = None) -> dict:
             "Content-Type": "application/json",
         },
     )
-    try:
-        with urllib.request.urlopen(req) as resp:
+
+    def _send():
+        with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read())
+
+    try:
+        return notion_rate.call_with_retry(_send, method)
     except urllib.error.HTTPError as e:
         body = e.read().decode()
+        # Les messages d'erreur Notion citent souvent l'id de la page : masqué.
         try:
             notion_error = json.loads(body)
-            print(f"Erreur Notion {e.code} : {notion_error.get('code')} — {notion_error.get('message')}")
+            message = notion_rate.redact_ids(notion_error.get("message"))
+            print(f"Erreur Notion {e.code} : {notion_error.get('code')} — {message}")
         except json.JSONDecodeError:
-            print(f"Erreur HTTP {e.code} : {body}")
+            print(f"Erreur HTTP {e.code} : {notion_rate.redact_ids(body)}")
         raise
 
 

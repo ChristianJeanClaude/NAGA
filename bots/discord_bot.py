@@ -28,6 +28,8 @@ from pathlib import Path
 
 import discord
 
+import notion_rate
+
 # --- Configuration -----------------------------------------------------------
 
 ENV_DISCORD = Path.home() / ".env.discord"
@@ -473,14 +475,20 @@ class NotionClient:
             f"{NOTION_API}{path}", data=data, headers=self._headers, method=method
         )
 
+        def _send():
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+
         def _do():
+            # Throttle partagé avec notion_leads + nouvel essai sur 429 / 5xx.
+            # Le chemin est loggué sans ses id Notion.
+            safe_path = notion_rate.redact_ids(path)
             try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    return json.loads(resp.read().decode("utf-8"))
+                return notion_rate.call_with_retry(_send, method)
             except urllib.error.HTTPError as exc:
-                raise NotionError(f"Notion {method} {path} → HTTP {exc.code}") from None
+                raise NotionError(f"Notion {method} {safe_path} → HTTP {exc.code}") from None
             except urllib.error.URLError as exc:
-                raise NotionError(f"Notion {method} {path} → {exc.reason}") from None
+                raise NotionError(f"Notion {method} {safe_path} → {exc.reason}") from None
 
         return await asyncio.to_thread(_do)
 
@@ -747,6 +755,8 @@ class NagaScraperBot(discord.Client):
         self._thread_leads = {}
         # {thread_id: page_id} pour le refresh des résumés IA après scraping.
         self._lead_page_ids = {}
+        # {thread_id: asyncio.Lock} : sérialise les pushs d'un même fil.
+        self._push_locks = {}
 
     async def on_ready(self):
         log(f"Connecté en tant que {self.user} — scraping de l'historique…")
@@ -777,7 +787,7 @@ class NagaScraperBot(discord.Client):
             await self.process_message(message)
             count += 1
         # Conversation du thread complète : on pousse une seule fois vers Leads.
-        self._push_thread_lead(channel.id)
+        await self._push_thread_lead(channel.id)
         return count
 
     def _is_target(self, channel):
@@ -791,7 +801,7 @@ class NagaScraperBot(discord.Client):
         if not accepte_auteur(message) or not self._is_target(message.channel):
             return
         await self.process_message(message)
-        self._push_thread_lead(message.channel.id)
+        await self._push_thread_lead(message.channel.id)
 
     async def on_thread_create(self, thread):
         # Nouveau post de forum : le message d'ouverture peut ne pas déclencher
@@ -800,7 +810,7 @@ class NagaScraperBot(discord.Client):
             return
         async for message in thread.history(limit=None, oldest_first=True):
             await self.process_message(message)
-        self._push_thread_lead(thread.id)
+        await self._push_thread_lead(thread.id)
 
     async def on_thread_update(self, before, after):
         if after.parent_id != self._channel_id:
@@ -832,7 +842,7 @@ class NagaScraperBot(discord.Client):
                     acc["title"] = after.name
                 if tags_changed:
                     acc["tags"] = [t.name for t in getattr(after, "applied_tags", [])]
-                self._push_thread_lead(after.id)
+                await self._push_thread_lead(after.id)
                 log(f"Lead mis à jour pour « {after.name} ».")
 
     async def process_message(self, message):
@@ -916,36 +926,45 @@ class NagaScraperBot(discord.Client):
         acc["pieces"].extend(att["url"] for att in record["attachments"])
         acc["date"] = record["timestamp"]
 
-    def _push_thread_lead(self, thread_id):
-        """Pousse la conversation agrégée d'un thread vers la base Leads."""
+    async def _push_thread_lead(self, thread_id):
+        """Pousse la conversation agrégée d'un thread vers la base Leads.
+
+        Le push (urllib bloquant, avec attentes de throttle et de nouvel essai)
+        tourne dans un thread : la boucle asyncio reste libre pour la gateway
+        Discord, dont les heartbeats ne doivent jamais attendre Notion. Un
+        verrou par fil sérialise les pushs d'un même thread : deux pushs
+        concurrents (ex. on_thread_create + on_message) créeraient deux pages.
+        """
         if self._push_lead is None:
             return
-        acc = self._thread_leads.get(thread_id)
-        if not acc:
-            return
-        # Anti double-push : si rien n'a changé depuis le dernier push de ce
-        # thread (ex. on_thread_create suivi de on_message à l'ouverture), on
-        # n'appelle pas Notion une seconde fois pour un contenu identique.
-        signature = (
-            acc["title"], tuple(acc.get("tags") or ()),
-            len(acc["messages"]), len(acc["liens"]), len(acc["pieces"]), acc.get("date"),
-        )
-        if acc.get("_pushed_sig") == signature:
-            return
-        data = build_lead_payload(
-            acc["title"], acc["messages"], acc["liens"], acc["pieces"], acc.get("date"),
-            thread_id=thread_id,
-            tags=acc.get("tags") or None,
-            game=acc.get("game"),
-            raw_text="\n\n".join(acc.get("raw_texts", [])),
-        )
-        try:
-            result = self._push_lead(data)
-            self._lead_page_ids[thread_id] = result["id"]
-            acc["_pushed_sig"] = signature
-            log(f"Lead poussé : « {acc['title']} ».")
-        except Exception as exc:  # noqa: BLE001 — isole tout échec du module tiers
-            log(f"Échec push Leads pour « {acc['title']} » : {exc}")
+        lock = self._push_locks.setdefault(thread_id, asyncio.Lock())
+        async with lock:
+            acc = self._thread_leads.get(thread_id)
+            if not acc:
+                return
+            # Anti double-push : si rien n'a changé depuis le dernier push de ce
+            # thread (ex. on_thread_create suivi de on_message à l'ouverture), on
+            # n'appelle pas Notion une seconde fois pour un contenu identique.
+            signature = (
+                acc["title"], tuple(acc.get("tags") or ()),
+                len(acc["messages"]), len(acc["liens"]), len(acc["pieces"]), acc.get("date"),
+            )
+            if acc.get("_pushed_sig") == signature:
+                return
+            data = build_lead_payload(
+                acc["title"], acc["messages"], acc["liens"], acc["pieces"], acc.get("date"),
+                thread_id=thread_id,
+                tags=acc.get("tags") or None,
+                game=acc.get("game"),
+                raw_text="\n\n".join(acc.get("raw_texts", [])),
+            )
+            try:
+                result = await asyncio.to_thread(self._push_lead, data)
+                self._lead_page_ids[thread_id] = result["id"]
+                acc["_pushed_sig"] = signature
+                log(f"Lead poussé : « {acc['title']} ».")
+            except Exception as exc:  # noqa: BLE001 — isole tout échec du module tiers
+                log(f"Échec push Leads pour « {acc['title']} » : {exc}")
 
     async def _refresh_lead_summaries(self):
         """Force le remplissage auto Notion IA sur les leads non rafraîchis depuis SUMMARY_REFRESH_DAYS.

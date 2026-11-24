@@ -5,6 +5,9 @@ on ne teste que l'extraction de liens, le parsing de slug Steam et la constructi
 du record JSON à partir d'un faux message (stub).
 """
 
+import asyncio
+import threading
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -728,6 +731,7 @@ def _bare_bot(push_lead=None):
     bot = discord_bot.NagaScraperBot.__new__(discord_bot.NagaScraperBot)
     bot._thread_leads = {}
     bot._lead_page_ids = {}
+    bot._push_locks = {}
     bot._push_lead = push_lead
     return bot
 
@@ -752,8 +756,12 @@ def test_push_thread_lead_pas_de_double_push_si_inchange():
     calls = []
     bot = _bare_bot(push_lead=lambda data: calls.append(data) or {"id": "p1"})
     bot._accumulate_lead(1, "T", _msg("m1"))
-    bot._push_thread_lead(1)
-    bot._push_thread_lead(1)  # rien n'a changé → pas de second appel
+
+    async def scenario():
+        await bot._push_thread_lead(1)
+        await bot._push_thread_lead(1)  # rien n'a changé → pas de second appel
+
+    asyncio.run(scenario())
     assert len(calls) == 1
 
 
@@ -761,10 +769,57 @@ def test_push_thread_lead_repousse_si_nouveau_message():
     calls = []
     bot = _bare_bot(push_lead=lambda data: calls.append(data) or {"id": "p1"})
     bot._accumulate_lead(1, "T", _msg("m1"))
-    bot._push_thread_lead(1)
-    bot._accumulate_lead(1, "T", _msg("m2", "autre"))  # nouveau message
-    bot._push_thread_lead(1)
+
+    async def scenario():
+        await bot._push_thread_lead(1)
+        bot._accumulate_lead(1, "T", _msg("m2", "autre"))  # nouveau message
+        await bot._push_thread_lead(1)
+
+    asyncio.run(scenario())
     assert len(calls) == 2
+
+
+def test_push_thread_lead_hors_de_la_boucle_asyncio():
+    # Le push Notion (bloquant) ne doit jamais tourner dans le thread de la boucle.
+    threads = []
+    bot = _bare_bot(push_lead=lambda data: threads.append(threading.current_thread()) or {"id": "p1"})
+    bot._accumulate_lead(1, "T", _msg("m1"))
+    asyncio.run(bot._push_thread_lead(1))
+    assert threads and threads[0] is not threading.main_thread()
+
+
+def test_push_thread_lead_concurrents_un_seul_push():
+    # on_thread_create et on_message simultanés sur un même fil : un seul push,
+    # jamais deux en parallèle (sinon deux pages créées).
+    calls, active, overlap = [], [0], []
+
+    def slow_push(data):
+        active[0] += 1
+        overlap.append(active[0])
+        time.sleep(0.05)
+        active[0] -= 1
+        calls.append(data)
+        return {"id": "p1"}
+
+    bot = _bare_bot(push_lead=slow_push)
+    bot._accumulate_lead(1, "T", _msg("m1"))
+
+    async def scenario():
+        await asyncio.gather(bot._push_thread_lead(1), bot._push_thread_lead(1))
+
+    asyncio.run(scenario())
+    assert len(calls) == 1
+    assert max(overlap) == 1
+
+
+def test_push_thread_lead_echec_isole():
+    def failing_push(data):
+        raise RuntimeError("HTTP Error 429: Too Many Requests")
+
+    bot = _bare_bot(push_lead=failing_push)
+    bot._accumulate_lead(1, "T", _msg("m1"))
+    asyncio.run(bot._push_thread_lead(1))  # ne lève pas
+    assert "_pushed_sig" not in bot._thread_leads[1]  # retenté au prochain événement
 
 
 # --- messages postés par webhook (skill naga-sync-echanges) -------------------
